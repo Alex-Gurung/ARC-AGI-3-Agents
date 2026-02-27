@@ -249,9 +249,13 @@ def render_status(agent: Any, step_data: StepData) -> Panel:
     )
 
 
-def render_llm_io(captures: Captures) -> Panel:
-    """Show the latest LLM interaction for each component."""
-    lines = Text()
+def render_llm_io(captures: Captures, agent: Any = None) -> Panel:
+    """Show the latest LLM interaction for each component.
+
+    Shows full model output (chain of thought + answer) since that's
+    the most useful debugging info.
+    """
+    sections: list[Text] = []
 
     for name, color in [("curiosity", "cyan"), ("solver", "magenta"), ("learner", "yellow")]:
         data = getattr(captures, name, {})
@@ -261,32 +265,55 @@ def render_llm_io(captures: Captures) -> Panel:
         prompt = data.get("prompt", "")
         output = data.get("output", "")
 
-        lines.append(f"[{name.capitalize()}] ", style=f"bold {color}")
+        header = Text()
+        header.append(f"── {name.capitalize()} ", style=f"bold {color}")
 
-        # Show a compact version of the output
-        if output:
-            # Show just the first 2 lines of output (the useful parts)
-            out_lines = output.strip().splitlines()
-            compact = " │ ".join(line.strip() for line in out_lines[-3:] if line.strip())
-            lines.append(compact[:120], style="white")
-        else:
-            lines.append("(no response)", style="dim")
-        lines.append("\n")
-
-        # Show a very compact prompt summary (just the dynamic parts)
+        # Show key prompt context on the header line
         if prompt:
-            # Find the most informative prompt lines
-            for marker in ["STATE:", "CHANGED", "MEMORY", "PLAN:", "SUBGOAL:", "PREDICTION:"]:
+            ctx_parts = []
+            for marker in ["PREDICTION:", "SUBGOAL:", "PLAN:"]:
                 for pline in prompt.splitlines():
                     if marker in pline:
-                        lines.append(f"  {pline.strip()[:100]}", style="dim")
-                        lines.append("\n")
+                        val = pline.split(marker, 1)[1].strip()[:60]
+                        if val and val != "none" and val != "no prediction":
+                            ctx_parts.append(f"{marker} {val}")
                         break
+            if ctx_parts:
+                header.append("(" + ", ".join(ctx_parts) + ")", style="dim")
 
-    if not lines.plain.strip():
-        lines.append("(no LLM calls yet)", style="dim")
+        sections.append(header)
 
-    return Panel(lines, title="LLM I/O", border_style="bright_black")
+        # Full model output — this is the interesting part
+        if output:
+            for out_line in output.strip().splitlines():
+                stripped = out_line.strip()
+                if not stripped:
+                    continue
+                line_text = Text()
+                # Highlight ANSWER/EXPECTED lines
+                if stripped.upper().startswith("ANSWER"):
+                    line_text.append(f"  {stripped}", style=f"bold {color}")
+                elif stripped.upper().startswith("EXPECTED"):
+                    line_text.append(f"  {stripped}", style="italic")
+                elif stripped.upper().startswith(("ADD", "MODIFY", "REMOVE")):
+                    line_text.append(f"  {stripped}", style="bold yellow")
+                elif stripped.upper() == "NONE":
+                    line_text.append(f"  {stripped}", style="dim")
+                else:
+                    line_text.append(f"  {stripped}", style="dim white")
+                sections.append(line_text)
+        else:
+            sections.append(Text("  (no response)", style="dim"))
+
+    if not sections:
+        sections.append(Text("(no LLM calls yet)", style="dim"))
+
+    combined = Text()
+    for i, section in enumerate(sections):
+        combined.append_text(section)
+        combined.append("\n")
+
+    return Panel(combined, title="LLM I/O", border_style="bright_black")
 
 
 def render_history(history: list[StepData], max_rows: int = 12) -> Panel:
@@ -301,7 +328,7 @@ def render_history(history: list[StepData], max_rows: int = 12) -> Panel:
     table.add_column("Level", width=8)
     table.add_column("Surpr", width=6, justify="right")
     table.add_column("ΔMem", width=5, justify="right")
-    table.add_column("Prediction", ratio=1)
+    table.add_column("Prediction", no_wrap=True, overflow="ellipsis", max_width=60)
 
     visible = history[-max_rows:]
     for sd in visible:
@@ -317,7 +344,7 @@ def render_history(history: list[StepData], max_rows: int = 12) -> Panel:
             sd.level,
             f"{sd.surprise:.3f}",
             Text(mem_str, style=mem_style),
-            Text(sd.prediction[:50] if sd.prediction else "-", style="dim italic"),
+            Text(sd.prediction if sd.prediction else "-", style="dim italic"),
         )
 
     return Panel(table, title=f"History ({len(history)} steps)", border_style="bright_black")
@@ -505,7 +532,7 @@ def run(
             console.print(render_status(agent, sd))
 
             # LLM I/O
-            console.print(render_llm_io(captures))
+            console.print(render_llm_io(captures, agent))
 
             # History
             console.print(render_history(history))

@@ -1,5 +1,187 @@
 # Loop Agent Status
 
+## Architecture
+
+### Main Loop Cycle
+
+The agent runs an explore-learn-exploit loop, up to 80 steps per game.
+Execution is hierarchical: maintain an active plan and subgoal, execute
+short subgoal action sequences, then learn/update phase at sequence boundary.
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│ GAME ENV → STATE ENCODER → state_text                               │
+│          (grid + actions)                                           │
+│                                                                      │
+│ EXPLORE path: Curiosity chooses action/subgoal/plan                  │
+│ EXPLOIT path: Solver uses active plan + active subgoal               │
+│                                                                      │
+│ If in subgoal sequence mode:                                         │
+│   propose_subgoal_actions() → execute queued actions open-loop       │
+│   (no learner/phase update until sequence boundary)                  │
+│                                                                      │
+│ Sequence boundary (or normal single-step path):                      │
+│   Learner update (ADD/MODIFY/REMOVE/NONE)                            │
+│   Surprise score (for Level Controller + metrics)                    │
+│   Phase update (driven by learner_changed/GAME_OVER)                 │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+### Phase Transitions
+
+```
+                ┌──────────────────────────────────┐
+                │                                  │
+                │   memory stable (5+ NONEs)       │
+                │   OR explore budget exhausted    │
+                │                                  │
+    ╔═══════════▼══╗                  ╔════════════╧═══╗
+    ║              ║   learner        ║                ║
+    ║   EXPLORE    ║   changed     ◀──║    EXPLOIT     ║
+    ║              ║   memory         ║                ║
+    ║  Curiosity   ║◀─────────────────║  Solver picks  ║
+    ║  proposes    ║                  ║  best action   ║
+    ║  info-seeking║   GAME_OVER      ║  from memory   ║
+    ║  actions     ║◀──diagnose───────║                ║
+    ║              ║   + regress      ║                ║
+    ╚══════════════╝   level          ╚════════════════╝
+```
+
+Note: during active subgoal sequences, `learner changed memory` is evaluated
+at `finalize_subgoal_sequence()` rather than every primitive action.
+
+### Abstraction Levels
+
+The Level Controller advances when surprise converges (<5% change over
+a window of 5 steps). On GAME_OVER, the Learner diagnoses which level
+broke and the controller regresses to that level.
+
+```
+    ┌─────────────────────────────────────────────────────────────┐
+    │                                                             │
+    │  ┌──────────┐   converge   ┌──────────┐  converge  ┌─────┐│
+    │  │  ACTION  │─────────────▶│ SUBGOAL  │───────────▶│PLAN ││
+    │  │          │              │          │            │     ││
+    │  │ single   │◀─ diagnose ──│ sequence │◀─diagnose─│multi││
+    │  │ move     │              │ of 1-4   │           │step ││
+    │  │ per step │              │ actions  │           │strat││
+    │  └──────────┘              └──────────┘            └─────┘│
+    │                                                             │
+    │  Curiosity:  Curiosity:          Curiosity:                 │
+    │  "try        "investigate        "devise overall            │
+    │   ACTION2"    the top row"        strategy as               │
+    │                                   ordered subgoals"         │
+    │                                                             │
+    │  Solver:     Solver:             Solver:                    │
+    │  picks       proposes 1-4        follows plan,              │
+    │  one         actions for         picks subgoal,             │
+    │  action      current subgoal     then action sequence       │
+    └─────────────────────────────────────────────────────────────┘
+```
+
+### Component Data Flow
+
+```
+    reads ──▶     writes ══▶
+
+    ┌───────────────────────────────────────────────────────────────┐
+    │                                                               │
+    │  STATE ENCODER ──────▶ state_text ──▶ Curiosity               │
+    │       │                    │     ──▶ Solver                   │
+    │       │                    └───────▶ Learner                  │
+    │       │                                                       │
+    │       └──────────────▶ diff_text  ──▶ Learner                 │
+    │                                                               │
+    │  MEMORY ─────────────▶ memory_text ──▶ Curiosity              │
+    │       ▲                          ──▶ Solver                  │
+    │       │                          ──▶ Learner                 │
+    │       │                                                       │
+    │       ╚══════════════════════════════ Learner                 │
+    │                                      (ADD/MODIFY/REMOVE)      │
+    │                                                               │
+    │  SURPRISE ───────────▶ score ────────▶ Level Controller       │
+    │                                                               │
+    │  Learner changed? ─────▶ phase updater (EXPLORE/EXPLOIT)      │
+    │  GAME_OVER ────────────▶ phase updater + diagnosis            │
+    │                                                               │
+    │  LEVEL CONTROLLER ───▶ current_level ▶ Curiosity              │
+    │                                  ──▶ Solver                  │
+    │                                                               │
+    │  Curiosity/Solver ───▶ prediction ───▶ Learner                │
+    │                                                               │
+    └───────────────────────────────────────────────────────────────┘
+```
+
+### Subgoal Sequence Execution
+
+When at subgoal or plan level during EXPLOIT, the Solver proposes
+a short action sequence (1-4 actions) for the current subgoal.
+These are executed open-loop, then evaluated as a batch.
+
+```
+    Solver.propose_subgoal_actions()
+         │
+         ▼
+    ┌─────────────────────────────────────────────────┐
+    │  action₁ ──▶ action₂ ──▶ action₃ ──▶ action₄   │
+    │                                                  │
+    │  executed sequentially, no learner between steps │
+    │                                                  │
+    │  interrupted if:                                 │
+    │    • terminal state (WIN / GAME_OVER)            │
+    │    • 2+ steps with no grid changes               │
+    └─────────────────────┬───────────────────────────┘
+                          │
+                          ▼
+                 finalize_subgoal_sequence()
+                    • learner sees full before→after
+                    • surprise scored once for sequence
+                    • may advance to next subgoal
+```
+
+### Memory Lifecycle
+
+```
+    GAME START
+         │
+         ▼
+    ┌─────────────┐
+    │ Empty memory │ (0/50)
+    │             │
+    │ EXPLORE     │  Learner fills entries:
+    │ phase       │  observations, rules, actions
+    │             │
+    └──────┬──────┘
+           │ 5+ consecutive NONEs (stable)
+           ▼
+    ┌─────────────┐
+    │ Stable      │  Solver reads memory to act
+    │ memory      │  Learner still watches
+    │             │  If prediction wrong → back to explore
+    │ EXPLOIT     │
+    │ phase       │
+    └──────┬──────┘
+           │ level complete
+           ▼
+    ┌─────────────┐
+    │ New level   │  Memory persists (mode-dependent)
+    │             │  State encoder resets
+    │ brief       │  Surprise history resets
+    │ re-explore  │  15% of remaining budget
+    └──────┬──────┘
+           │ full reset (RESET action)
+           ▼
+    ┌─────────────────────────────────┐
+    │ Memory persistence mode:        │
+    │   strict → clear all            │
+    │   carry  → keep all             │
+    │   noisy  → delete 20%, jitter   │
+    │            confidence, shuffle   │
+    └─────────────────────────────────┘
+```
+
+---
+
 ## Current State
 
 The `LoopAgent` is now an explore-learn-exploit harness with:
@@ -44,7 +226,6 @@ Memory remains list-based, but each entry now has a stable ID:
 
 - `VLLM_BASE_URL`, `VLLM_MODEL`, `VLLM_API_KEY`
 - `SURPRISE_STRATEGY` = `heuristic` | `logprob`
-- `SURPRISE_THRESHOLD`
 - `EXPLORE_BUDGET_RATIO`, `RE_EXPLORE_BUDGET`
 - `MEMORY_PERSISTENCE_MODE` = `strict` | `carry` | `noisy`
 - `NOISY_DELETE_FRACTION`, `NOISY_CONF_JITTER`
@@ -59,7 +240,7 @@ Memory remains list-based, but each entry now has a stable ID:
 1. Add a strict evaluation preset script (forces blank memory at new attempts and fixed deterministic settings).
 2. Add stronger subgoal sequence stop conditions (e.g. explicit `subgoal_done` classifier, surprise guard).
 3. Add stable-ID-aware learner prompt examples (`REMOVE M####`, `MODIFY M####`) so model natively uses IDs.
-4. Add calibration tooling for surprise thresholds per game family and per memory mode.
+4. Add calibration tooling for surprise scaling (for metrics/RL rewards) per game family and memory mode.
 5. Add trajectory logger schema for RL (group candidates + rewards + advantages + chosen sample).
 6. Implement warm/cold/noisy rollout mix for training data generation:
    - suggested starting ratio: 60/30/10.
