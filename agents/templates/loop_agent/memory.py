@@ -1,0 +1,337 @@
+"""Memory data structure for the LoopAgent.
+
+Bounded list of typed entries with ADD/REMOVE/MODIFY operations,
+confidence tracking, and justifications. Max 50 entries with
+lowest-confidence eviction when full.
+"""
+
+import logging
+import random
+import re
+from dataclasses import dataclass, field
+from typing import Literal, Optional
+
+logger = logging.getLogger(__name__)
+
+MemoryType = Literal["ACTION", "RULE", "SUBGOAL", "PLAN", "OBSERVATION", "VOCAB"]
+
+VALID_TYPES: set[str] = {"ACTION", "RULE", "SUBGOAL", "PLAN", "OBSERVATION", "VOCAB"}
+
+
+@dataclass
+class MemoryEntry:
+    """A single entry in the agent's memory."""
+
+    type: MemoryType
+    content: str  # what we believe
+    justification: str  # why we believe it
+    confidence: float  # 0-1
+    created_step: int
+    last_modified_step: int
+    memory_id: str = field(default="")
+
+    def to_text(self) -> str:
+        """Serialize to single-line text for LLM context."""
+        id_text = f"[id={self.memory_id}]" if self.memory_id else ""
+        return (
+            f"{id_text}[{self.type}] {self.content} | "
+            f"{self.justification} (conf: {self.confidence:.2f})"
+        )
+
+
+class Memory:
+    """Bounded memory database with ADD/REMOVE/MODIFY operations."""
+
+    MAX_ENTRIES: int = 50
+
+    def __init__(self, max_entries: int = 50) -> None:
+        self.MAX_ENTRIES = max_entries
+        self.entries: list[MemoryEntry] = []
+        self._next_id: int = 1
+
+    def _new_memory_id(self) -> str:
+        memory_id = f"M{self._next_id:04d}"
+        self._next_id += 1
+        return memory_id
+
+    def _resolve_index(self, ref: int | str) -> Optional[int]:
+        if isinstance(ref, int):
+            return ref if 0 <= ref < len(self.entries) else None
+
+        text = str(ref).strip().upper()
+        if not text:
+            return None
+
+        if text.isdigit():
+            idx = int(text)
+            return idx if 0 <= idx < len(self.entries) else None
+
+        if text.startswith("M"):
+            for idx, entry in enumerate(self.entries):
+                if entry.memory_id.upper() == text:
+                    return idx
+
+        return None
+
+    def add(self, entry: MemoryEntry) -> int:
+        """Add a new entry. Returns index. Evicts lowest-confidence if full."""
+        if len(self.entries) >= self.MAX_ENTRIES:
+            self._evict_lowest_confidence()
+        if not entry.memory_id:
+            entry.memory_id = self._new_memory_id()
+        self.entries.append(entry)
+        idx = len(self.entries) - 1
+        logger.debug(f"Memory ADD [{idx}]: {entry.to_text()}")
+        return idx
+
+    def remove(self, index: int | str, reason: str = "") -> Optional[MemoryEntry]:
+        """Remove entry by index or memory_id. Returns removed entry or None if invalid."""
+        resolved = self._resolve_index(index)
+        if resolved is None:
+            logger.warning(
+                f"Memory REMOVE failed: ref {index} could not be resolved "
+                f"(size={len(self.entries)})"
+            )
+            return None
+        index = resolved
+        if 0 <= index < len(self.entries):
+            removed = self.entries.pop(index)
+            logger.debug(
+                f"Memory REMOVE [{index}][{removed.memory_id}]: "
+                f"{removed.to_text()} | reason: {reason}"
+            )
+            return removed
+        logger.warning(
+            f"Memory REMOVE failed: index {index} out of range "
+            f"(0-{len(self.entries) - 1})"
+        )
+        return None
+
+    def modify(
+        self,
+        index: int | str,
+        content: str,
+        justification: str,
+        confidence: float,
+        step: int,
+    ) -> bool:
+        """Modify entry by index or memory_id. Returns True if successful."""
+        resolved = self._resolve_index(index)
+        if resolved is None:
+            logger.warning(
+                f"Memory MODIFY failed: ref {index} could not be resolved "
+                f"(size={len(self.entries)})"
+            )
+            return False
+        index = resolved
+        if 0 <= index < len(self.entries):
+            entry = self.entries[index]
+            old_text = entry.to_text()
+            entry.content = content
+            entry.justification = justification
+            entry.confidence = confidence
+            entry.last_modified_step = step
+            logger.debug(
+                f"Memory MODIFY [{index}][{entry.memory_id}]: "
+                f"{old_text} -> {entry.to_text()}"
+            )
+            return True
+        logger.warning(
+            f"Memory MODIFY failed: index {index} out of range "
+            f"(0-{len(self.entries) - 1})"
+        )
+        return False
+
+    def get(self, index: int | str) -> Optional[MemoryEntry]:
+        """Get entry by index or memory_id."""
+        resolved = self._resolve_index(index)
+        if resolved is None:
+            return None
+        index = resolved
+        if 0 <= index < len(self.entries):
+            return self.entries[index]
+        return None
+
+    def get_by_type(self, entry_type: MemoryType) -> list[tuple[int, MemoryEntry]]:
+        """Get all entries of a specific type with their indices."""
+        return [(i, e) for i, e in enumerate(self.entries) if e.type == entry_type]
+
+    def get_low_confidence(self, threshold: float = 0.5) -> list[tuple[int, MemoryEntry]]:
+        """Get entries with confidence below threshold."""
+        return [(i, e) for i, e in enumerate(self.entries) if e.confidence < threshold]
+
+    def to_text(self) -> str:
+        """Serialize full memory for LLM context."""
+        if not self.entries:
+            return "MEMORY (0/50 entries): empty"
+        lines = [f"MEMORY ({len(self.entries)}/{self.MAX_ENTRIES} entries):"]
+        for i, entry in enumerate(self.entries):
+            lines.append(f"[idx={i}]{entry.to_text()}")
+        return "\n".join(lines)
+
+    def to_text_with_indices(self) -> str:
+        """Serialize with prominent indices for REMOVE/MODIFY references."""
+        return self.to_text()  # same format, indices already included
+
+    def _evict_lowest_confidence(self) -> None:
+        """Remove the entry with lowest confidence to make room."""
+        if not self.entries:
+            return
+        min_idx = min(range(len(self.entries)), key=lambda i: self.entries[i].confidence)
+        evicted = self.entries.pop(min_idx)
+        logger.debug(f"Memory EVICT [{min_idx}]: {evicted.to_text()}")
+
+    def clear(self) -> None:
+        """Clear all entries."""
+        self.entries.clear()
+
+    def perturb(
+        self,
+        delete_fraction: float = 0.2,
+        confidence_jitter: float = 0.1,
+        shuffle_entries: bool = True,
+    ) -> None:
+        """Apply mild random corruption to improve robustness in training runs."""
+        if not self.entries:
+            return
+
+        delete_fraction = max(0.0, min(1.0, delete_fraction))
+        remove_count = min(len(self.entries), int(round(len(self.entries) * delete_fraction)))
+        if remove_count > 0:
+            remove_indices = sorted(
+                random.sample(range(len(self.entries)), remove_count),
+                reverse=True,
+            )
+            for idx in remove_indices:
+                removed = self.entries.pop(idx)
+                logger.debug(f"Memory PERTURB remove [{idx}][{removed.memory_id}]")
+
+        if confidence_jitter > 0:
+            for entry in self.entries:
+                delta = random.uniform(-confidence_jitter, confidence_jitter)
+                entry.confidence = max(0.0, min(1.0, entry.confidence + delta))
+
+        if shuffle_entries and len(self.entries) > 1:
+            random.shuffle(self.entries)
+
+    def __len__(self) -> int:
+        return len(self.entries)
+
+    def __bool__(self) -> bool:
+        return len(self.entries) > 0
+
+
+def parse_memory_operation(text: str, current_step: int) -> dict:
+    """Parse LLM output into a memory operation.
+
+    Expected formats:
+        ADD [TYPE] content | justification (confidence)
+        MODIFY index content | justification (confidence)
+        REMOVE index | reason
+        NONE
+
+    Returns dict with 'op' key ('add', 'modify', 'remove', 'none', 'error')
+    and relevant fields.
+    """
+    text = text.strip()
+
+    # Handle NONE
+    if text.upper() == "NONE" or not text:
+        return {"op": "none"}
+
+    # Try ADD
+    add_match = re.match(
+        r"ADD\s+\[(\w+)\]\s+(.+?)\s*\|\s*(.+?)\s*\((\d*\.?\d+)\)\s*$",
+        text,
+        re.IGNORECASE,
+    )
+    if add_match:
+        entry_type = add_match.group(1).upper()
+        if entry_type not in VALID_TYPES:
+            return {"op": "error", "reason": f"Invalid type: {entry_type}"}
+        confidence = float(add_match.group(4))
+        confidence = max(0.0, min(1.0, confidence))
+        return {
+            "op": "add",
+            "entry": MemoryEntry(
+                type=entry_type,  # type: ignore[arg-type]
+                content=add_match.group(2).strip(),
+                justification=add_match.group(3).strip(),
+                confidence=confidence,
+                created_step=current_step,
+                last_modified_step=current_step,
+            ),
+        }
+
+    # Try MODIFY
+    modify_match = re.match(
+        r"MODIFY\s+([Mm]\d+|\d+)\s+(.+?)\s*\|\s*(.+?)\s*\((\d*\.?\d+)\)\s*$",
+        text,
+        re.IGNORECASE,
+    )
+    if modify_match:
+        confidence = float(modify_match.group(4))
+        confidence = max(0.0, min(1.0, confidence))
+        ref = modify_match.group(1)
+        index = int(ref) if ref.isdigit() else None
+        return {
+            "op": "modify",
+            "ref": ref,
+            "index": index,
+            "content": modify_match.group(2).strip(),
+            "justification": modify_match.group(3).strip(),
+            "confidence": confidence,
+        }
+
+    # Try REMOVE
+    remove_match = re.match(
+        r"REMOVE\s+([Mm]\d+|\d+)\s*\|\s*(.+)$",
+        text,
+        re.IGNORECASE,
+    )
+    if remove_match:
+        ref = remove_match.group(1)
+        index = int(ref) if ref.isdigit() else None
+        return {
+            "op": "remove",
+            "ref": ref,
+            "index": index,
+            "reason": remove_match.group(2).strip(),
+        }
+
+    return {"op": "error", "reason": f"Could not parse: {text[:100]}"}
+
+
+def apply_memory_operation(memory: Memory, operation: dict, current_step: int) -> bool:
+    """Apply a parsed memory operation to the memory. Returns True if memory changed."""
+    op = operation.get("op", "none")
+
+    if op == "none":
+        return False
+
+    if op == "add":
+        entry = operation["entry"]
+        memory.add(entry)
+        return True
+
+    if op == "modify":
+        return memory.modify(
+            index=operation.get("ref", operation.get("index")),
+            content=operation["content"],
+            justification=operation["justification"],
+            confidence=operation["confidence"],
+            step=current_step,
+        )
+
+    if op == "remove":
+        removed = memory.remove(
+            index=operation.get("ref", operation.get("index")),
+            reason=operation.get("reason", ""),
+        )
+        return removed is not None
+
+    if op == "error":
+        logger.warning(f"Memory operation error: {operation.get('reason', 'unknown')}")
+        return False
+
+    return False

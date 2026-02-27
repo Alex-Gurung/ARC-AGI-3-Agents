@@ -12,6 +12,7 @@ from .templates.llm_agents import LLM, FastLLM, GuidedLLM, ReasoningLLM
 from .templates.multimodal import MultiModalLLM
 from .templates.random_agent import Random
 from .templates.reasoning_agent import ReasoningAgent
+from .templates.loop_agent import LoopAgent
 from .templates.smolagents import SmolCodingAgent, SmolVisionAgent
 
 load_dotenv()
@@ -28,6 +29,8 @@ for rec in Recorder.list():
 
 # update the agent dictionary to include subclasses of LLM class
 AVAILABLE_AGENTS["reasoningagent"] = ReasoningAgent
+AVAILABLE_AGENTS["loopagent"] = LoopAgent
+AVAILABLE_AGENTS["loop"] = LoopAgent
 
 __all__ = [
     "Swarm",
@@ -43,6 +46,7 @@ __all__ = [
     "ReasoningAgent",
     "SmolCodingAgent",
     "SmolVisionAgent",
+    "LoopAgent",
     "Agent",
     "Recorder",
     "Playback",
