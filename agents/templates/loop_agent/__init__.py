@@ -42,8 +42,8 @@ class LoopAgent(Agent):
     """Explore-Learn-Exploit agent with adaptive phase transitions.
 
     Overrides Agent.main() to add post-step handling:
-    - Learner updates memory after actions
-    - Surprise computation for phase transitions
+    - Learner updates memory after actions/subgoal sequences
+    - Subgoal-sequence execution with boundary evaluation
     - Level controller for abstraction level switching
     """
 
@@ -54,8 +54,7 @@ class LoopAgent(Agent):
     VLLM_MODEL: str = os.environ.get("VLLM_MODEL", "google/gemma-3-1b-it")
     VLLM_API_KEY: str = os.environ.get("VLLM_API_KEY", "dummy")
 
-    # Phase transition thresholds
-    SURPRISE_THRESHOLD: float = float(os.environ.get("SURPRISE_THRESHOLD", "0.3"))
+    # Phase transition budgets
     EXPLORE_BUDGET_RATIO: float = float(os.environ.get("EXPLORE_BUDGET_RATIO", "0.25"))
     RE_EXPLORE_BUDGET: int = int(os.environ.get("RE_EXPLORE_BUDGET", "5"))
 
@@ -64,8 +63,15 @@ class LoopAgent(Agent):
     MEMORY_PERSISTENCE_MODE: str = os.environ.get(
         "MEMORY_PERSISTENCE_MODE", "strict"
     ).lower()  # strict | carry | noisy
-    USE_SUBGOAL_BURSTS: bool = os.environ.get("USE_SUBGOAL_BURSTS", "true").lower() == "true"
-    BURST_MAX_STEPS: int = int(os.environ.get("BURST_MAX_STEPS", "4"))
+    # New names; keep backward-compatible env var fallbacks.
+    USE_SUBGOAL_SEQUENCES: bool = os.environ.get(
+        "USE_SUBGOAL_SEQUENCES",
+        os.environ.get("USE_SUBGOAL_BURSTS", "true"),
+    ).lower() == "true"
+    SUBGOAL_MAX_ACTIONS: int = int(
+        os.environ.get("SUBGOAL_MAX_ACTIONS", os.environ.get("BURST_MAX_STEPS", "4"))
+    )
+    SUBGOAL_NO_CHANGE_LIMIT: int = int(os.environ.get("SUBGOAL_NO_CHANGE_LIMIT", "2"))
     LEARNER_UPDATE_INTERVAL: int = int(os.environ.get("LEARNER_UPDATE_INTERVAL", "1"))
     KEYFRAME_INTERVAL: int = int(os.environ.get("STATE_KEYFRAME_INTERVAL", "10"))
 
@@ -111,9 +117,21 @@ class LoopAgent(Agent):
         # State tracking
         self._last_state_text: Optional[str] = None
         self._current_state_text: Optional[str] = None
+        self._last_prediction: str = ""
         self._levels_completed_at_reset: int = 0
-        self._pending_action_queue: list[GameAction] = []
+        self._pending_subgoal_actions: list[GameAction] = []
         self._pending_subgoal_keyframe: bool = False
+        self._active_plan_text: str = ""
+        self._active_plan_steps: list[str] = []
+        self._active_subgoal_index: int = 0
+        self._active_subgoal: Optional[str] = None
+        self._subgoal_sequence_active: bool = False
+        self._subgoal_sequence_start_state: Optional[str] = None
+        self._subgoal_sequence_start_grid: Optional[list[list[int]]] = None
+        self._subgoal_sequence_expected: str = ""
+        self._subgoal_sequence_planned_actions: list[str] = []
+        self._subgoal_sequence_taken_actions: list[str] = []
+        self._subgoal_no_change_streak: int = 0
 
     @trace_agent_session
     def main(self) -> None:
@@ -141,7 +159,7 @@ class LoopAgent(Agent):
                     f"{self.game_id} - {action.name}: count {self.action_counter}, "
                     f"levels completed {frame_after.levels_completed}, "
                     f"phase {self.phase.value}, level {self.level_controller.current_level}, "
-                    f"memory {len(self.memory)}, queued {len(self._pending_action_queue)}, "
+                    f"memory {len(self.memory)}, queued {len(self._pending_subgoal_actions)}, "
                     f"avg fps {self.fps}"
                 )
                 self._post_step(state_before, grid_before, action, frame_after)
@@ -157,11 +175,8 @@ class LoopAgent(Agent):
         self, frames: list[FrameData], latest_frame: FrameData
     ) -> GameAction:
         """Choose action based on current phase."""
-        # Execute pre-planned burst actions first to reduce solver call overhead.
-        if self._pending_action_queue:
-            return self._pending_action_queue.pop(0)
-
         if latest_frame.state in (GameState.NOT_PLAYED, GameState.GAME_OVER):
+            self._reset_subgoal_sequence_state(clear_pending=True)
             return GameAction.RESET
 
         # A full_reset flag appears on the frame produced by RESET. Reinitialize state
@@ -172,6 +187,10 @@ class LoopAgent(Agent):
         if latest_frame.levels_completed > self._levels_completed_at_reset:
             self._on_level_complete(latest_frame)
 
+        # Execute pre-planned subgoal actions first.
+        if self._pending_subgoal_actions:
+            return self._pending_subgoal_actions.pop(0)
+
         available_actions = self._get_available_action_names(latest_frame)
         state_text = (
             self._current_state_text
@@ -181,7 +200,7 @@ class LoopAgent(Agent):
 
         if self.phase == Phase.EXPLORE:
             return self._explore_action(state_text, available_actions)
-        return self._exploit_action(state_text, available_actions)
+        return self._exploit_action(state_text, available_actions, latest_frame)
 
     def _explore_action(self, state_text: str, available_actions: list[str]) -> GameAction:
         """Pick an action using curiosity."""
@@ -196,7 +215,10 @@ class LoopAgent(Agent):
         self.explore_actions_taken += 1
 
         if result["type"] == "plan":
-            self.solver.set_plan(result["value"])
+            self._set_active_plan(
+                plan_text=result["value"],
+                plan_steps=result.get("steps", []),
+            )
             result = self.curiosity.propose_action(
                 state_text=state_text,
                 memory=self.memory,
@@ -204,8 +226,7 @@ class LoopAgent(Agent):
                 level="action",
             )
         elif result["type"] == "subgoal":
-            self.solver.set_subgoal(result["value"])
-            # Force a keyframe after the next action to anchor the subgoal attempt.
+            self._set_active_subgoal(result["value"])
             self._pending_subgoal_keyframe = True
             result = self.curiosity.propose_action(
                 state_text=state_text,
@@ -214,39 +235,50 @@ class LoopAgent(Agent):
                 level="action",
             )
 
+        self._last_prediction = result.get("prediction", "")
         action_name = result.get("value", "RESET")
         return self._name_to_game_action(action_name, available_actions)
 
-    def _exploit_action(self, state_text: str, available_actions: list[str]) -> GameAction:
+    def _exploit_action(
+        self,
+        state_text: str,
+        available_actions: list[str],
+        latest_frame: FrameData,
+    ) -> GameAction:
         """Pick an action using solver."""
-        if (
-            self.USE_SUBGOAL_BURSTS
-            and self.level_controller.current_level == "subgoal"
-            and self.solver.has_subgoal
-        ):
-            burst = self.solver.propose_burst(
-                state_text=state_text,
-                memory=self.memory,
-                available_actions=available_actions,
-                max_steps=self.BURST_MAX_STEPS,
-            )
-            burst_actions = [
-                self._name_to_game_action(action_name, available_actions)
-                for action_name in burst.get("actions", [])
-            ]
-            if burst_actions:
-                self._pending_action_queue.extend(burst_actions[1:])
-                logger.debug(
-                    f"Using burst ({len(burst_actions)} steps): "
-                    f"{[a.name for a in burst_actions]}"
+        if self.USE_SUBGOAL_SEQUENCES and self.level_controller.current_level == "subgoal":
+            self._ensure_active_plan(state_text, available_actions)
+            self._ensure_active_subgoal()
+
+            if self._active_subgoal:
+                sequence = self.solver.propose_subgoal_actions(
+                    state_text=state_text,
+                    memory=self.memory,
+                    available_actions=available_actions,
+                    max_steps=self.SUBGOAL_MAX_ACTIONS,
                 )
-                return burst_actions[0]
+                action_names = sequence.get("actions", [])
+                actions = [
+                    self._name_to_game_action(action_name, available_actions)
+                    for action_name in action_names
+                ]
+                if actions:
+                    self._start_subgoal_sequence(
+                        state_before=state_text,
+                        grid_before=self._copy_grid(latest_frame.frame[-1] if latest_frame.frame else []),
+                        planned_action_names=action_names,
+                        expected=sequence.get("prediction", ""),
+                    )
+                    self._pending_subgoal_actions.extend(actions[1:])
+                    self._last_prediction = sequence.get("prediction", "")
+                    return actions[0]
 
         result = self.solver.solve(
             state_text=state_text,
             memory=self.memory,
             available_actions=available_actions,
         )
+        self._last_prediction = result.get("prediction", "")
         action_name = result.get("action", "RESET")
         return self._name_to_game_action(action_name, available_actions)
 
@@ -257,7 +289,7 @@ class LoopAgent(Agent):
         action: GameAction,
         frame_after: FrameData,
     ) -> None:
-        """Post-step processing: surprise, learner, phase transitions, keyframes."""
+        """Post-step processing: subgoal-boundary learner updates and phase transitions."""
         state_after = self.state_encoder.encode(
             frame_after,
             force_keyframe=self._pending_subgoal_keyframe,
@@ -269,45 +301,274 @@ class LoopAgent(Agent):
         diff_text = self.state_encoder.get_diff_text(grid_before, grid_after)
         num_changed = self.state_encoder.get_num_changed_cells(grid_before, grid_after)
 
-        surprise_score = self.surprise.compute(
-            state_before=state_before,
-            action=action.name,
-            state_after=state_after,
-            memory=self.memory,
-            num_changed_cells=num_changed,
-        )
-        if surprise_score > self.SURPRISE_THRESHOLD:
-            self.state_encoder.force_keyframe_next("surprise_spike")
-
-        if self._should_run_learner(surprise_score, frame_after):
-            self.learner.update(
-                state_before=state_before,
-                action_taken=action.name,
+        if self._subgoal_sequence_active:
+            self._handle_subgoal_sequence_step(
+                action=action,
                 state_after=state_after,
-                diff_text=diff_text,
-                memory=self.memory,
-                current_step=self.action_counter,
+                grid_after=grid_after,
+                frame_after=frame_after,
+                num_changed_cells=num_changed,
             )
         else:
-            logger.debug("Skipping learner update during burst execution")
+            # Non-sequence step (typically exploration): keep per-step updates.
+            learner_changed = False
+            if self._should_run_learner(num_changed, frame_after):
+                learner_changed = self.learner.update(
+                    state_before=state_before,
+                    action_taken=action.name,
+                    state_after=state_after,
+                    diff_text=diff_text,
+                    memory=self.memory,
+                    current_step=self.action_counter,
+                    prediction=self._last_prediction,
+                )
+            else:
+                logger.debug("Skipping learner update on this step")
 
-        self.level_controller.update(surprise_score)
-        self._update_phase(surprise_score, frame_after)
+            surprise_score = self.surprise.compute(
+                state_before=state_before,
+                action=action.name,
+                state_after=state_after,
+                memory=self.memory,
+                num_changed_cells=num_changed,
+            )
+            self.level_controller.update(surprise_score)
+            self._update_phase(learner_changed, frame_after)
 
         self._last_state_text = state_after
         self._current_state_text = None
 
-    def _should_run_learner(self, surprise_score: float, frame_after: FrameData) -> bool:
-        in_burst = len(self._pending_action_queue) > 0
+    def _handle_subgoal_sequence_step(
+        self,
+        action: GameAction,
+        state_after: str,
+        grid_after: list[list[int]],
+        frame_after: FrameData,
+        num_changed_cells: int,
+    ) -> None:
+        """Track one executed subgoal action and finalize at boundary."""
+        self._subgoal_sequence_taken_actions.append(action.name)
+        if num_changed_cells == 0:
+            self._subgoal_no_change_streak += 1
+        else:
+            self._subgoal_no_change_streak = 0
+
+        terminal = frame_after.state in (GameState.WIN, GameState.GAME_OVER)
+        no_change_interrupt = self._subgoal_no_change_streak >= self.SUBGOAL_NO_CHANGE_LIMIT
+        if no_change_interrupt and self._pending_subgoal_actions:
+            logger.info(
+                "Subgoal sequence interrupted: no grid changes for "
+                f"{self._subgoal_no_change_streak} consecutive actions"
+            )
+            self._pending_subgoal_actions.clear()
+
+        sequence_done = terminal or not self._pending_subgoal_actions or no_change_interrupt
+        if not sequence_done:
+            return
+
+        reason = "terminal" if terminal else "no_change" if no_change_interrupt else "exhausted"
+        self._finalize_subgoal_sequence(
+            state_after=state_after,
+            grid_after=grid_after,
+            frame_after=frame_after,
+            reason=reason,
+        )
+
+    def _finalize_subgoal_sequence(
+        self,
+        state_after: str,
+        grid_after: list[list[int]],
+        frame_after: FrameData,
+        reason: str,
+    ) -> None:
+        """Run learner/phase updates once at subgoal boundary."""
+        start_state = self._subgoal_sequence_start_state or self._last_state_text or state_after
+        start_grid = self._subgoal_sequence_start_grid or self._copy_grid(grid_after)
+        action_trace = self._subgoal_sequence_taken_actions or self._subgoal_sequence_planned_actions
+        if not action_trace:
+            action_trace = ["RESET"]
+        action_taken = f"SUBGOAL_SEQ[{', '.join(action_trace)}]"
+
+        diff_text = self.state_encoder.get_diff_text(start_grid, grid_after)
+        total_changed = self.state_encoder.get_num_changed_cells(start_grid, grid_after)
+
+        learner_changed = self.learner.update(
+            state_before=start_state,
+            action_taken=action_taken,
+            state_after=state_after,
+            diff_text=diff_text,
+            memory=self.memory,
+            current_step=self.action_counter,
+            prediction=self._subgoal_sequence_expected or self._last_prediction,
+        )
+
+        surprise_score = self.surprise.compute(
+            state_before=start_state,
+            action=action_taken,
+            state_after=state_after,
+            memory=self.memory,
+            num_changed_cells=total_changed,
+        )
+        self.level_controller.update(surprise_score)
+        self._update_phase(learner_changed, frame_after)
+
+        terminal = frame_after.state in (GameState.WIN, GameState.GAME_OVER)
+        if (
+            self.phase == Phase.EXPLOIT
+            and not terminal
+            and reason == "exhausted"
+            and not learner_changed
+        ):
+            advanced = self._advance_subgoal()
+            if advanced:
+                self.state_encoder.force_keyframe_next("subgoal_advance")
+
+        self._reset_subgoal_sequence_state(clear_pending=True)
+
+    def _set_active_plan(self, plan_text: str, plan_steps: list[str] | None = None) -> None:
+        """Set currently active plan and initialize subgoal pointer."""
+        cleaned_plan = plan_text.strip()
+        steps = plan_steps if plan_steps is not None else self.curiosity.parse_plan_steps(cleaned_plan)
+        steps = [s.strip() for s in steps if s.strip()]
+
+        if not cleaned_plan and steps:
+            cleaned_plan = "; ".join(f"{i+1}) {s}" for i, s in enumerate(steps))
+
+        self._active_plan_text = cleaned_plan
+        self._active_plan_steps = steps
+        self._active_subgoal_index = 0
+        self._active_subgoal = None
+
+        if cleaned_plan:
+            self.solver.set_plan(cleaned_plan)
+        else:
+            self.solver.clear_plan()
+
+        if self._active_plan_steps:
+            self._set_active_subgoal(self._active_plan_steps[0])
+            logger.info(
+                f"Active plan set with {len(self._active_plan_steps)} subgoals: "
+                f"{self._active_plan_steps[:3]}"
+            )
+        else:
+            self.solver.clear_subgoal()
+            logger.info("Active plan set but no parseable subgoals were found")
+
+    def _set_active_subgoal(self, subgoal: str) -> None:
+        """Set the currently active subgoal."""
+        text = subgoal.strip()
+        if not text:
+            return
+        self._active_subgoal = text
+        self.solver.set_subgoal(text)
+        self._pending_subgoal_keyframe = True
+
+    def _ensure_active_plan(self, state_text: str, available_actions: list[str]) -> None:
+        """Create a plan if none is active."""
+        if self._active_plan_steps:
+            return
+        result = self.curiosity.propose_action(
+            state_text=state_text,
+            memory=self.memory,
+            available_actions=available_actions,
+            level="plan",
+        )
+        if result.get("type") == "plan":
+            self._set_active_plan(
+                plan_text=result.get("value", ""),
+                plan_steps=result.get("steps", []),
+            )
+
+    def _ensure_active_subgoal(self) -> None:
+        """Set current subgoal from active plan if needed."""
+        if self._active_subgoal:
+            return
+        if not self._active_plan_steps:
+            return
+        self._active_subgoal_index = min(
+            max(self._active_subgoal_index, 0),
+            len(self._active_plan_steps) - 1,
+        )
+        self._set_active_subgoal(self._active_plan_steps[self._active_subgoal_index])
+
+    def _advance_subgoal(self) -> bool:
+        """Advance to the next subgoal in the active plan."""
+        if not self._active_plan_steps:
+            return False
+        next_idx = self._active_subgoal_index + 1
+        if next_idx >= len(self._active_plan_steps):
+            logger.info("Active plan exhausted; clearing plan state")
+            self._reset_plan_state()
+            return False
+        self._active_subgoal_index = next_idx
+        self._set_active_subgoal(self._active_plan_steps[next_idx])
+        return True
+
+    def _start_subgoal_sequence(
+        self,
+        state_before: str,
+        grid_before: list[list[int]],
+        planned_action_names: list[str],
+        expected: str,
+    ) -> None:
+        """Initialize subgoal sequence tracking."""
+        self._subgoal_sequence_active = True
+        self._subgoal_sequence_start_state = state_before
+        self._subgoal_sequence_start_grid = self._copy_grid(grid_before)
+        self._subgoal_sequence_expected = expected.strip()
+        self._subgoal_sequence_planned_actions = planned_action_names[:]
+        self._subgoal_sequence_taken_actions = []
+        self._subgoal_no_change_streak = 0
+        self._pending_subgoal_keyframe = True
+        logger.debug(
+            f"Starting subgoal sequence with {len(planned_action_names)} actions: "
+            f"{planned_action_names}"
+        )
+
+    def _reset_subgoal_sequence_state(self, clear_pending: bool = False) -> None:
+        """Clear transient sequence execution state."""
+        self._subgoal_sequence_active = False
+        self._subgoal_sequence_start_state = None
+        self._subgoal_sequence_start_grid = None
+        self._subgoal_sequence_expected = ""
+        self._subgoal_sequence_planned_actions = []
+        self._subgoal_sequence_taken_actions = []
+        self._subgoal_no_change_streak = 0
+        if clear_pending:
+            self._pending_subgoal_actions.clear()
+
+    def _reset_plan_state(self) -> None:
+        """Clear active plan and subgoal state."""
+        self._active_plan_text = ""
+        self._active_plan_steps = []
+        self._active_subgoal_index = 0
+        self._active_subgoal = None
+        self.solver.clear_plan()
+
+    def _should_run_learner(self, num_changed_cells: int, frame_after: FrameData) -> bool:
+        """Decide whether to run the learner this step.
+
+        Always runs unless we're mid-sequence AND nothing interesting happened.
+        During sequences, we still run on terminal states or large grid changes.
+        """
+        in_sequence = len(self._pending_subgoal_actions) > 0
         interval_due = self.LEARNER_UPDATE_INTERVAL <= 1 or (
             self.action_counter % self.LEARNER_UPDATE_INTERVAL == 0
         )
         terminal = frame_after.state in (GameState.WIN, GameState.GAME_OVER)
-        high_surprise = surprise_score > self.SURPRISE_THRESHOLD
-        return interval_due and (not in_burst or terminal or high_surprise)
+        large_change = num_changed_cells > 20
+        return interval_due and (not in_sequence or terminal or large_change)
 
-    def _update_phase(self, surprise_score: float, frame_after: FrameData) -> None:
-        """Manage explore/exploit phase transitions."""
+    def _update_phase(self, learner_changed: bool, frame_after: FrameData) -> None:
+        """Manage explore/exploit phase transitions.
+
+        Phase transitions are driven by the learner's behavior:
+        - Explore -> Exploit: when learner stops updating memory (consecutive NONEs)
+        - Exploit -> Explore: when learner updates memory (something unexpected) or GAME_OVER
+
+        The insight: if the learner changes memory, our world model was wrong.
+        That IS the surprise signal. No threshold needed.
+        """
         if self.phase == Phase.EXPLORE:
             if self.re_explore_remaining > 0:
                 self.re_explore_remaining -= 1
@@ -335,20 +596,26 @@ class LoopAgent(Agent):
             return
 
         if self.phase == Phase.EXPLOIT:
-            if frame_after.state == GameState.GAME_OVER or surprise_score > self.SURPRISE_THRESHOLD:
+            # Re-enter explore when the learner updates memory (our model was wrong)
+            # or on GAME_OVER (something clearly went wrong).
+            should_reexplore = frame_after.state == GameState.GAME_OVER or learner_changed
+
+            if should_reexplore:
                 reason = (
                     "GAME_OVER"
                     if frame_after.state == GameState.GAME_OVER
-                    else f"surprise={surprise_score:.3f}"
+                    else "learner updated memory (unexpected outcome)"
                 )
                 logger.info(f"Phase: EXPLOIT -> EXPLORE ({reason})")
                 self.phase = Phase.EXPLORE
                 self.re_explore_remaining = self.RE_EXPLORE_BUDGET
                 self.learner.reset_stability()
                 self.state_encoder.force_keyframe_next("phase_reentry")
+
+                # Diagnose which level broke on GAME_OVER
                 if frame_after.state == GameState.GAME_OVER:
                     diagnosis = self.learner.diagnose(
-                        expected="continued progress",
+                        expected=self._last_prediction or "continued progress",
                         actual="GAME_OVER",
                         memory=self.memory,
                     )
@@ -380,8 +647,8 @@ class LoopAgent(Agent):
         )
         self.level_controller.reset()
         self.learner.reset_stability()
-        self.solver.clear_plan()
-        self._pending_action_queue.clear()
+        self._reset_plan_state()
+        self._reset_subgoal_sequence_state(clear_pending=True)
         self._pending_subgoal_keyframe = False
         self._last_state_text = None
         self._current_state_text = None
@@ -402,8 +669,8 @@ class LoopAgent(Agent):
         self.explore_budget = max(5, int(remaining * 0.15))
         self.level_controller.reset()
         self.learner.reset_stability()
-        self.solver.clear_plan()
-        self._pending_action_queue.clear()
+        self._reset_plan_state()
+        self._reset_subgoal_sequence_state(clear_pending=True)
         self._pending_subgoal_keyframe = False
         self._last_state_text = None
         self._current_state_text = None
@@ -435,6 +702,10 @@ class LoopAgent(Agent):
             "ACTION6",
             "ACTION7",
         ]
+
+    @staticmethod
+    def _copy_grid(grid: list[list[int]]) -> list[list[int]]:
+        return [row[:] for row in grid]
 
     def _fallback_action(self, available_actions: list[str]) -> GameAction:
         candidate = available_actions[0] if available_actions else "RESET"

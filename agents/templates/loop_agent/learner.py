@@ -8,6 +8,7 @@ the surprise score is NOT passed to the model (it's a system-level signal).
 """
 
 import logging
+import re
 from typing import Optional
 
 from openai import OpenAI
@@ -22,20 +23,21 @@ You are building a knowledge base about a game by observing what happens after e
 
 BEFORE: {state_before}
 ACTION: {action_taken}
+PREDICTION: {prediction}
 AFTER: {state_after}
 DIFF: {diff_text}
 
 MEMORY:
 {memory_text}
 
-Compare BEFORE and AFTER. Did this action reveal something new, confirm something we believed, or contradict something in memory?
+Compare the PREDICTION with what actually happened (AFTER/DIFF). Did the outcome match expectations? Did this action reveal something new, confirm something we believed, or contradict something in memory?
 
 If something new was learned or something needs correcting, output one line in this format:
 ADD [TYPE] what we learned | why we think this (confidence 0-1)
 MODIFY index corrected belief | why the correction (confidence 0-1)
 REMOVE index | why this entry is wrong
 
-If nothing notable happened, output:
+If the outcome matched expectations and nothing notable happened, output:
 NONE
 
 Type must be one of: ACTION, RULE, SUBGOAL, PLAN, OBSERVATION, VOCAB
@@ -48,7 +50,8 @@ Examples:
 - REMOVE 5 | this was contradicted when ACTION3 moved us right, not left
 - NONE
 
-Update:"""
+Briefly think step by step, then output exactly one final line:
+ANSWER: <one line memory update in the required format>"""
 
 DIAGNOSIS_PROMPT = """\
 Something unexpected happened while trying to solve the game.
@@ -66,7 +69,8 @@ Which level of our understanding was wrong?
 
 Which specific memory entry (by index) is most likely wrong?
 
-Level:"""
+Briefly think step by step, then output exactly one final line:
+ANSWER: level=<action|subgoal|plan> index=<n or none>"""
 
 
 class Learner:
@@ -85,6 +89,7 @@ class Learner:
         diff_text: str,
         memory: Memory,
         current_step: int,
+        prediction: str = "",
     ) -> bool:
         """Observe a state transition and update memory.
 
@@ -95,6 +100,7 @@ class Learner:
             diff_text: Text description of changed cells.
             memory: The memory to update.
             current_step: Current step number.
+            prediction: What the agent expected to happen (from curiosity/solver).
 
         Returns:
             True if memory was changed, False otherwise.
@@ -104,20 +110,22 @@ class Learner:
         prompt = LEARNER_PROMPT.format(
             state_before=state_before,
             action_taken=action_taken,
+            prediction=prediction or "no prediction",
             state_after=state_after,
             diff_text=diff_text,
             memory_text=memory_text,
         )
 
         raw_output = self._call_llm(prompt)
+        answer_output = self._extract_answer(raw_output)
 
         # Parse and apply the memory operation
-        operation = parse_memory_operation(raw_output, current_step)
+        operation = parse_memory_operation(answer_output, current_step)
         changed = apply_memory_operation(memory, operation, current_step)
 
         if changed:
             self.consecutive_nones = 0
-            logger.info(f"Learner updated memory (step {current_step}): {raw_output[:100]}")
+            logger.info(f"Learner updated memory (step {current_step}): {answer_output[:100]}")
         else:
             self.consecutive_nones += 1
             logger.debug(f"Learner: no update (step {current_step}, {self.consecutive_nones} consecutive)")
@@ -147,7 +155,8 @@ class Learner:
         )
 
         raw_output = self._call_llm(prompt)
-        return self._parse_diagnosis(raw_output)
+        answer_output = self._extract_answer(raw_output)
+        return self._parse_diagnosis(answer_output)
 
     def _call_llm(self, prompt: str) -> str:
         """Call the LLM with a single prompt."""
@@ -180,13 +189,24 @@ class Learner:
 
         # Try to find entry index
         entry_index = None
-        import re
 
         match = re.search(r"(?:entry|index)\s*:?\s*(\d+)", text)
         if match:
             entry_index = int(match.group(1))
 
         return {"level": level, "entry_index": entry_index}
+
+    def _extract_answer(self, raw_output: str) -> str:
+        """Extract the payload after the final ANSWER: marker if present."""
+        text = raw_output.strip()
+
+        matches = re.findall(r"(?im)^\s*ANSWER\s*:\s*(.+)$", text)
+        if matches:
+            return matches[-1].strip()
+        inline = re.split(r"(?i)\bANSWER\s*:\s*", text)
+        if len(inline) > 1:
+            return inline[-1].strip().splitlines()[0].strip()
+        return text
 
     @property
     def memory_is_stable(self) -> bool:

@@ -35,7 +35,11 @@ UNSURE (low confidence entries):
 
 Choose an action that teaches us something new or tests a weak assumption. Choose from: {available_actions_str}
 
-Action:"""
+Briefly think step by step, then output exactly two final lines:
+ANSWER: <one action from the list>
+EXPECTED: <short description of what you expect to happen>
+If selecting ACTION6, use coordinates:
+ANSWER: ACTION6 x y"""
 
 SUBGOAL_PROMPT = """\
 You are exploring a game. Your goal is to propose a target or interaction that would increase our understanding of the game, or test something we're unsure about.
@@ -50,7 +54,8 @@ UNSURE (low confidence entries):
 {low_confidence_entries}
 
 Propose one specific thing to investigate or test (short phrase):
-Goal:"""
+Briefly think step by step, then output exactly one final line:
+ANSWER: <short goal phrase>"""
 
 PLAN_PROMPT = """\
 You are trying to understand how to solve a game. Propose an overall strategy that we can test. Focus on what we don't yet understand about how to win.
@@ -58,8 +63,9 @@ You are trying to understand how to solve a game. Propose an overall strategy th
 MEMORY:
 {memory_text}
 
-Propose a strategy to test (numbered steps, max 5):
-Plan:"""
+Propose a strategy to test as ordered subgoals (max 5):
+Briefly think step by step, then output exactly one final line:
+ANSWER: <step1>; <step2>; <step3>"""
 
 
 class Curiosity:
@@ -88,6 +94,8 @@ class Curiosity:
             dict with keys:
                 - "type": "action" | "subgoal" | "plan"
                 - "value": the action name (for action) or text (for subgoal/plan)
+                - "steps": parsed plan steps (for plan only)
+                - "prediction": what the model expects to happen (str)
                 - "raw": raw LLM output
         """
         memory_text = memory.to_text() if memory else "empty"
@@ -129,14 +137,33 @@ class Curiosity:
             level = "action"
 
         raw_output = self._call_llm(prompt)
+        answer_output = self._extract_answer(raw_output)
+        prediction = self._extract_expected(raw_output)
 
         if level == "action":
-            action_name = self._parse_action(raw_output, available_actions)
-            return {"type": "action", "value": action_name, "raw": raw_output}
+            action_name = self._parse_action(answer_output, available_actions)
+            return {
+                "type": "action",
+                "value": action_name,
+                "prediction": prediction,
+                "raw": raw_output,
+            }
         elif level == "subgoal":
-            return {"type": "subgoal", "value": raw_output.strip(), "raw": raw_output}
+            return {
+                "type": "subgoal",
+                "value": (answer_output or raw_output).strip(),
+                "prediction": prediction,
+                "raw": raw_output,
+            }
         else:  # plan
-            return {"type": "plan", "value": raw_output.strip(), "raw": raw_output}
+            plan_text = (answer_output or raw_output).strip()
+            return {
+                "type": "plan",
+                "value": plan_text,
+                "steps": self.parse_plan_steps(plan_text),
+                "prediction": prediction,
+                "raw": raw_output,
+            }
 
     def _call_llm(self, prompt: str) -> str:
         """Call the LLM with a single prompt, return raw text output."""
@@ -194,3 +221,52 @@ class Curiosity:
             f"Falling back to {available_actions[0]}"
         )
         return available_actions[0] if available_actions else "RESET"
+
+    def _extract_expected(self, raw_output: str) -> str:
+        """Extract the prediction after EXPECTED: marker."""
+        text = raw_output.strip()
+        matches = re.findall(r"(?im)^\s*EXPECTED\s*:\s*(.+)$", text)
+        if matches:
+            return matches[-1].strip()
+        # Fallback: try inline
+        inline = re.split(r"(?i)\bEXPECTED\s*:\s*", text)
+        if len(inline) > 1:
+            return inline[-1].strip().splitlines()[0].strip()
+        return ""
+
+    def _extract_answer(self, raw_output: str) -> str:
+        """Extract the payload after the final ANSWER: marker if present."""
+        text = raw_output.strip()
+        matches = re.findall(r"(?im)^\s*ANSWER\s*:\s*(.+)$", text)
+        if matches:
+            return matches[-1].strip()
+        # Fallback: content after last inline ANSWER:
+        inline = re.split(r"(?i)\bANSWER\s*:\s*", text)
+        if len(inline) > 1:
+            return inline[-1].strip().splitlines()[0].strip()
+        return text
+
+    def parse_plan_steps(self, plan_text: str, max_steps: int = 5) -> list[str]:
+        """Parse plan text into ordered subgoal steps."""
+        text = plan_text.strip()
+        if not text:
+            return []
+
+        # Prefer explicit separators.
+        if ";" in text:
+            parts = text.split(";")
+        elif "->" in text:
+            parts = text.split("->")
+        else:
+            parts = re.split(r"[\n\r]+", text)
+
+        steps: list[str] = []
+        for raw in parts:
+            cleaned = re.sub(r"^\s*(?:\d+[\).:\-]?\s*|[-*]\s*)", "", raw).strip()
+            if cleaned:
+                steps.append(cleaned)
+
+        if not steps and text:
+            steps = [text]
+
+        return steps[: max(1, max_steps)]

@@ -30,9 +30,13 @@ SUBGOAL: {active_subgoal}
 
 Pick the best action to make progress. Choose from: {available_actions_str}
 
-Action:"""
+Briefly think step by step, then output exactly two final lines:
+ANSWER: <one action from the list>
+EXPECTED: <short description of what you expect to happen>
+If selecting ACTION6, use coordinates:
+ANSWER: ACTION6 x y"""
 
-BURST_PROMPT = """\
+SUBGOAL_SEQUENCE_PROMPT = """\
 You are solving a game and currently have an active subgoal.
 
 STATE:
@@ -44,14 +48,14 @@ MEMORY:
 PLAN: {active_plan}
 SUBGOAL: {active_subgoal}
 
-Propose a short burst of actions to try before re-planning.
-Output format:
-SEQUENCE: action1, action2, action3
-MAX_STEPS: {max_steps}
-CHECK_EVERY: 2
+Propose a short sequence of actions to attempt this subgoal.
+MAX_ACTIONS: {max_steps}
 
 Actions must be from: {available_actions_str}
 If ACTION6 is used, include coordinates as: ACTION6 x y
+Briefly think step by step, then output exactly two final lines:
+ANSWER: action1, action2, action3
+EXPECTED: <short description of expected subgoal outcome>
 """
 
 
@@ -80,6 +84,7 @@ class Solver:
         Returns:
             dict with keys:
                 - "action": action name string
+                - "prediction": what the model expects to happen (str)
                 - "raw": raw LLM output
         """
         memory_text = memory.to_text() if memory else "empty"
@@ -94,9 +99,11 @@ class Solver:
         )
 
         raw_output = self._call_llm(prompt)
-        action_name = self._parse_action(raw_output, available_actions)
+        answer_output = self._extract_answer(raw_output)
+        prediction = self._extract_expected(raw_output)
+        action_name = self._parse_action(answer_output, available_actions)
 
-        return {"action": action_name, "raw": raw_output}
+        return {"action": action_name, "prediction": prediction, "raw": raw_output}
 
     def set_plan(self, plan: str) -> None:
         """Set the active plan (from curiosity at plan level)."""
@@ -113,21 +120,25 @@ class Solver:
         self.active_plan = None
         self.active_subgoal = None
 
+    def clear_subgoal(self) -> None:
+        """Clear active subgoal while keeping the plan."""
+        self.active_subgoal = None
+
     @property
     def has_subgoal(self) -> bool:
         return bool(self.active_subgoal)
 
-    def propose_burst(
+    def propose_subgoal_actions(
         self,
         state_text: str,
         memory: Memory,
         available_actions: list[str],
         max_steps: int = 4,
     ) -> dict[str, Any]:
-        """Propose a short burst of actions for subgoal-level execution."""
+        """Propose a short action sequence for the active subgoal."""
         memory_text = memory.to_text() if memory else "empty"
         available_actions_str = ", ".join(available_actions)
-        prompt = BURST_PROMPT.format(
+        prompt = SUBGOAL_SEQUENCE_PROMPT.format(
             state_text=state_text,
             memory_text=memory_text,
             active_plan=self.active_plan or "none",
@@ -136,8 +147,25 @@ class Solver:
             max_steps=max_steps,
         )
         raw_output = self._call_llm(prompt, max_tokens=192, temperature=0.3)
-        actions = self._parse_burst_actions(raw_output, available_actions, max_steps)
-        return {"actions": actions, "raw": raw_output}
+        answer_output = self._extract_answer(raw_output)
+        prediction = self._extract_expected(raw_output)
+        actions = self._parse_subgoal_actions(answer_output, available_actions, max_steps)
+        return {"actions": actions, "prediction": prediction, "raw": raw_output}
+
+    # Backward-compatible alias used by older harness code/tests.
+    def propose_burst(
+        self,
+        state_text: str,
+        memory: Memory,
+        available_actions: list[str],
+        max_steps: int = 4,
+    ) -> dict[str, Any]:
+        return self.propose_subgoal_actions(
+            state_text=state_text,
+            memory=memory,
+            available_actions=available_actions,
+            max_steps=max_steps,
+        )
 
     def _call_llm(
         self,
@@ -159,7 +187,7 @@ class Solver:
             logger.error(f"Solver LLM call failed: {e}")
             return ""
 
-    def _parse_burst_actions(
+    def _parse_subgoal_actions(
         self,
         raw_output: str,
         available_actions: list[str],
@@ -242,3 +270,25 @@ class Solver:
             f"Falling back to {available_actions[0]}"
         )
         return available_actions[0] if available_actions else "RESET"
+
+    def _extract_expected(self, raw_output: str) -> str:
+        """Extract the prediction after EXPECTED: marker."""
+        text = raw_output.strip()
+        matches = re.findall(r"(?im)^\s*EXPECTED\s*:\s*(.+)$", text)
+        if matches:
+            return matches[-1].strip()
+        inline = re.split(r"(?i)\bEXPECTED\s*:\s*", text)
+        if len(inline) > 1:
+            return inline[-1].strip().splitlines()[0].strip()
+        return ""
+
+    def _extract_answer(self, raw_output: str) -> str:
+        """Extract the payload after the final ANSWER: marker if present."""
+        text = raw_output.strip()
+        matches = re.findall(r"(?im)^\s*ANSWER\s*:\s*(.+)$", text)
+        if matches:
+            return matches[-1].strip()
+        inline = re.split(r"(?i)\bANSWER\s*:\s*", text)
+        if len(inline) > 1:
+            return inline[-1].strip().splitlines()[0].strip()
+        return text

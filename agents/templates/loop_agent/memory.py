@@ -241,7 +241,8 @@ def parse_memory_operation(text: str, current_step: int) -> dict:
 
     # Try ADD
     add_match = re.match(
-        r"ADD\s+\[(\w+)\]\s+(.+?)\s*\|\s*(.+?)\s*\((\d*\.?\d+)\)\s*$",
+        r"ADD\s+\[(\w+)\]\s+(.+?)\s*\|\s*(.+?)\s*"
+        r"\(\s*(?:conf(?:idence)?\s*:\s*)?(\d*\.?\d+)\s*\)\s*$",
         text,
         re.IGNORECASE,
     )
@@ -265,7 +266,8 @@ def parse_memory_operation(text: str, current_step: int) -> dict:
 
     # Try MODIFY
     modify_match = re.match(
-        r"MODIFY\s+([Mm]\d+|\d+)\s+(.+?)\s*\|\s*(.+?)\s*\((\d*\.?\d+)\)\s*$",
+        r"MODIFY\s+([Mm]\d+|\d+)\s+(.+?)\s*\|\s*(.+?)\s*"
+        r"\(\s*(?:conf(?:idence)?\s*:\s*)?(\d*\.?\d+)\s*\)\s*$",
         text,
         re.IGNORECASE,
     )
@@ -285,7 +287,7 @@ def parse_memory_operation(text: str, current_step: int) -> dict:
 
     # Try REMOVE
     remove_match = re.match(
-        r"REMOVE\s+([Mm]\d+|\d+)\s*\|\s*(.+)$",
+        r"REMOVE\s+([Mm]\d+|\d+)(?:\s*\|\s*(.+))?$",
         text,
         re.IGNORECASE,
     )
@@ -296,7 +298,7 @@ def parse_memory_operation(text: str, current_step: int) -> dict:
             "op": "remove",
             "ref": ref,
             "index": index,
-            "reason": remove_match.group(2).strip(),
+            "reason": (remove_match.group(2) or "").strip(),
         }
 
     return {"op": "error", "reason": f"Could not parse: {text[:100]}"}
