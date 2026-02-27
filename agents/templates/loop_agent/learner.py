@@ -19,7 +19,19 @@ logger = logging.getLogger(__name__)
 
 
 LEARNER_PROMPT = """\
-You are building a knowledge base about a game by observing what happens after each action. Your job is to notice patterns, confirm or correct existing beliefs, and record new discoveries.
+You are building a knowledge base about a game by observing what happens after each action. Focus on HIGH-LEVEL understanding — the most valuable entries are:
+
+- RULE: Game mechanics and constraints (e.g., "Black cells block movement", "Touching lava resets level")
+- VOCAB: What colors/sprites represent (e.g., "Color 9 = player", "Color 11 = exit door")
+- PLAN/SUBGOAL: Strategic insights (e.g., "Need key before door opens")
+- OBSERVATION: Notable environmental patterns
+- ACTION: ONLY basic movement mechanics (e.g., "ACTION1 moves player up 1 cell"). Do not re-add actions already in memory.
+
+IMPORTANT: Check MEMORY below before adding anything. If a similar entry exists, use MODIFY to refine it or output NONE. Do NOT add duplicates. Actively REMOVE outdated, wrong, or redundant entries to keep memory clean.
+
+PHASE: {phase}
+LEVEL: {level}
+SUBGOAL_INDEX: {subgoal_index}
 
 BEFORE: {state_before}
 ACTION: {action_taken}
@@ -30,28 +42,25 @@ DIFF: {diff_text}
 MEMORY:
 {memory_text}
 
-Compare the PREDICTION with what actually happened (AFTER/DIFF). Did the outcome match expectations? Did this action reveal something new, confirm something we believed, or contradict something in memory?
+Compare PREDICTION with AFTER/DIFF. Did the outcome match? Did this reveal something new, confirm a belief, or contradict something in memory?
 
-If something new was learned or something needs correcting, output one line in this format:
+You may output MULTIPLE operations (one per line). Formats:
 ADD [TYPE] what we learned | why we think this (confidence 0-1)
 MODIFY index corrected belief | why the correction (confidence 0-1)
-REMOVE index | why this entry is wrong
-
-If the outcome matched expectations and nothing notable happened, output:
+REMOVE index | why this entry is wrong or redundant
 NONE
 
-Type must be one of: ACTION, RULE, SUBGOAL, PLAN, OBSERVATION, VOCAB
-
 Examples:
-- ADD [ACTION] ACTION1 moves player up by 1 cell | player sprite shifted up after ACTION1 (0.8)
 - ADD [RULE] Black cells (5) block movement | tried moving into them twice with no effect (0.7)
-- ADD [VOCAB] Color 11 = border of exit door | touching it completed the level (0.9)
-- MODIFY 3 Energy decreases by 2 per move, not 1 | counted cells in row 61 more carefully (0.6)
-- REMOVE 5 | this was contradicted when ACTION3 moved us right, not left
+- ADD [VOCAB] Color 11 = exit door border | touching it completed the level (0.9)
+- MODIFY 3 Energy decreases by 2 per move, not 1 | counted more carefully (0.6)
+- REMOVE 5 | duplicate of entry 2
+- REMOVE 8 | contradicted when ACTION3 moved us right, not left
 - NONE
 
-Briefly think step by step, then output exactly one final line:
-ANSWER: <one line memory update in the required format>"""
+Think step by step, then output your operations:
+ANSWER:
+<one or more operations, one per line>"""
 
 DIAGNOSIS_PROMPT = """\
 Something unexpected happened while trying to solve the game.
@@ -92,6 +101,9 @@ class Learner:
         memory: Memory,
         current_step: int,
         prediction: str = "",
+        phase: str = "UNKNOWN",
+        level: str = "action",
+        subgoal_index: int | None = None,
     ) -> bool:
         """Observe a state transition and update memory.
 
@@ -103,13 +115,20 @@ class Learner:
             memory: The memory to update.
             current_step: Current step number.
             prediction: What the agent expected to happen (from curiosity/solver).
+            phase: Current high-level phase.
+            level: Current abstraction level.
+            subgoal_index: Active subgoal index, if any.
 
         Returns:
             True if memory was changed, False otherwise.
         """
         memory_text = memory.to_text() if memory else "empty"
+        stage_subgoal_index = str(subgoal_index) if subgoal_index is not None else "none"
 
         prompt = LEARNER_PROMPT.format(
+            phase=phase,
+            level=level,
+            subgoal_index=stage_subgoal_index,
             state_before=state_before,
             action_taken=action_taken,
             prediction=prediction or "no prediction",
@@ -123,18 +142,28 @@ class Learner:
         self.last_raw_output = raw_output
         self.last_answer_output = answer_output
 
-        # Parse and apply the memory operation
-        operation = parse_memory_operation(answer_output, current_step)
-        changed = apply_memory_operation(memory, operation, current_step)
+        # Parse and apply multiple operations (one per line)
+        any_changed = False
+        for line in answer_output.strip().splitlines():
+            line = line.strip()
+            if not line or line.upper() == "NONE":
+                continue
+            # Skip lines that look like markdown list bullets wrapping a real op
+            if line.startswith("- "):
+                line = line[2:].strip()
+            operation = parse_memory_operation(line, current_step)
+            changed = apply_memory_operation(memory, operation, current_step)
+            if changed:
+                any_changed = True
 
-        if changed:
+        if any_changed:
             self.consecutive_nones = 0
-            logger.info(f"Learner updated memory (step {current_step}): {answer_output[:100]}")
+            logger.info(f"Learner updated memory (step {current_step}): {answer_output[:120]}")
         else:
             self.consecutive_nones += 1
             logger.debug(f"Learner: no update (step {current_step}, {self.consecutive_nones} consecutive)")
 
-        return changed
+        return any_changed
 
     def diagnose(
         self,
@@ -203,15 +232,22 @@ class Learner:
         return {"level": level, "entry_index": entry_index}
 
     def _extract_answer(self, raw_output: str) -> str:
-        """Extract the payload after the final ANSWER: marker if present."""
+        """Extract everything after the final ANSWER: marker.
+
+        Supports multi-line answers (multiple operations after one ANSWER:).
+        """
         text = raw_output.strip()
 
-        matches = re.findall(r"(?im)^\s*ANSWER\s*:\s*(.+)$", text)
-        if matches:
-            return matches[-1].strip()
+        # Split on ANSWER: and take everything after the last one
+        parts = re.split(r"(?im)^\s*ANSWER\s*:\s*", text)
+        if len(parts) > 1:
+            return parts[-1].strip()
+
+        # Try inline split (ANSWER: not at line start)
         inline = re.split(r"(?i)\bANSWER\s*:\s*", text)
         if len(inline) > 1:
-            return inline[-1].strip().splitlines()[0].strip()
+            return inline[-1].strip()
+
         return text
 
     @property

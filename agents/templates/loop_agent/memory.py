@@ -73,8 +73,25 @@ class Memory:
 
         return None
 
-    def add(self, entry: MemoryEntry) -> int:
-        """Add a new entry. Returns index. Evicts lowest-confidence if full."""
+    def add(self, entry: MemoryEntry, dedup_threshold: float = 0.7) -> int:
+        """Add a new entry. Returns index. Evicts lowest-confidence if full.
+
+        If an existing entry of the same type has high word overlap
+        (Jaccard >= dedup_threshold), boosts its confidence instead of
+        adding a duplicate.
+        """
+        if dedup_threshold > 0:
+            similar_idx = self._find_similar(entry, threshold=dedup_threshold)
+            if similar_idx is not None:
+                existing = self.entries[similar_idx]
+                existing.confidence = min(1.0, max(existing.confidence, entry.confidence))
+                existing.last_modified_step = entry.created_step
+                logger.debug(
+                    f"Memory DEDUP: skipped add, boosted [{similar_idx}] "
+                    f"'{existing.content[:60]}' confidence to {existing.confidence:.2f}"
+                )
+                return similar_idx
+
         if len(self.entries) >= self.MAX_ENTRIES:
             self._evict_lowest_confidence()
         if not entry.memory_id:
@@ -83,6 +100,25 @@ class Memory:
         idx = len(self.entries) - 1
         logger.debug(f"Memory ADD [{idx}]: {entry.to_text()}")
         return idx
+
+    def _find_similar(self, entry: MemoryEntry, threshold: float = 0.7) -> Optional[int]:
+        """Find an existing entry with similar content (same type, high word overlap)."""
+        new_words = set(entry.content.lower().split())
+        if not new_words:
+            return None
+
+        for i, existing in enumerate(self.entries):
+            if existing.type != entry.type:
+                continue
+            existing_words = set(existing.content.lower().split())
+            if not existing_words:
+                continue
+            intersection = new_words & existing_words
+            union = new_words | existing_words
+            similarity = len(intersection) / len(union) if union else 0
+            if similarity >= threshold:
+                return i
+        return None
 
     def remove(self, index: int | str, reason: str = "") -> Optional[MemoryEntry]:
         """Remove entry by index or memory_id. Returns removed entry or None if invalid."""

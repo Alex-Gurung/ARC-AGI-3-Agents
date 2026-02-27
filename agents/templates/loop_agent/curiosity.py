@@ -24,6 +24,12 @@ logger = logging.getLogger(__name__)
 ACTION_PROMPT = """\
 You are exploring a game to understand how it works. Your goal is to propose an action that increases our knowledge of the game — either by trying something we haven't tried, or by testing an assumption we're unsure about.
 
+PHASE: {phase}
+LEVEL: {level}
+ACTIVE_PLAN: {active_plan}
+ACTIVE_SUBGOAL: {active_subgoal}
+SUBGOAL_INDEX: {subgoal_index}
+
 STATE:
 {state_text}
 
@@ -44,6 +50,12 @@ ANSWER: ACTION6 x y"""
 SUBGOAL_PROMPT = """\
 You are exploring a game. Your goal is to propose a target or interaction that would increase our understanding of the game, or test something we're unsure about.
 
+PHASE: {phase}
+LEVEL: {level}
+ACTIVE_PLAN: {active_plan}
+ACTIVE_SUBGOAL: {active_subgoal}
+SUBGOAL_INDEX: {subgoal_index}
+
 STATE:
 {state_text}
 
@@ -59,6 +71,12 @@ ANSWER: <short goal phrase>"""
 
 PLAN_PROMPT = """\
 You are trying to understand how to solve a game. Propose an overall strategy that we can test. Focus on what we don't yet understand about how to win.
+
+PHASE: {phase}
+LEVEL: {level}
+ACTIVE_PLAN: {active_plan}
+ACTIVE_SUBGOAL: {active_subgoal}
+SUBGOAL_INDEX: {subgoal_index}
 
 MEMORY:
 {memory_text}
@@ -81,6 +99,10 @@ class Curiosity:
         memory: Memory,
         available_actions: list[str],
         level: str = "action",
+        phase: str = "UNKNOWN",
+        active_plan: str = "none",
+        active_subgoal: str = "none",
+        subgoal_index: int | None = None,
     ) -> dict[str, Any]:
         """Propose an exploratory action/subgoal/plan.
 
@@ -89,6 +111,10 @@ class Curiosity:
             memory: Current memory.
             available_actions: List of available action names.
             level: Abstraction level ("action", "subgoal", "plan").
+            phase: Current high-level phase ("EXPLORE"/"EXPLOIT").
+            active_plan: Current active plan text, if any.
+            active_subgoal: Current active subgoal text, if any.
+            subgoal_index: Active subgoal index, if any.
 
         Returns:
             dict with keys:
@@ -110,9 +136,17 @@ class Curiosity:
             low_confidence_entries = "none"
 
         available_actions_str = ", ".join(available_actions)
+        stage_subgoal_index = str(subgoal_index) if subgoal_index is not None else "none"
+        active_plan_text = active_plan if active_plan else "none"
+        active_subgoal_text = active_subgoal if active_subgoal else "none"
 
         if level == "action":
             prompt = ACTION_PROMPT.format(
+                phase=phase,
+                level=level,
+                active_plan=active_plan_text,
+                active_subgoal=active_subgoal_text,
+                subgoal_index=stage_subgoal_index,
                 state_text=state_text,
                 memory_text=memory_text,
                 low_confidence_entries=low_confidence_entries,
@@ -120,21 +154,38 @@ class Curiosity:
             )
         elif level == "subgoal":
             prompt = SUBGOAL_PROMPT.format(
+                phase=phase,
+                level=level,
+                active_plan=active_plan_text,
+                active_subgoal=active_subgoal_text,
+                subgoal_index=stage_subgoal_index,
                 state_text=state_text,
                 memory_text=memory_text,
                 low_confidence_entries=low_confidence_entries,
             )
         elif level == "plan":
-            prompt = PLAN_PROMPT.format(memory_text=memory_text)
+            prompt = PLAN_PROMPT.format(
+                phase=phase,
+                level=level,
+                active_plan=active_plan_text,
+                active_subgoal=active_subgoal_text,
+                subgoal_index=stage_subgoal_index,
+                memory_text=memory_text,
+            )
         else:
             logger.warning(f"Unknown level {level}, defaulting to action")
+            level = "action"
             prompt = ACTION_PROMPT.format(
+                phase=phase,
+                level=level,
+                active_plan=active_plan_text,
+                active_subgoal=active_subgoal_text,
+                subgoal_index=stage_subgoal_index,
                 state_text=state_text,
                 memory_text=memory_text,
                 low_confidence_entries=low_confidence_entries,
                 available_actions_str=available_actions_str,
             )
-            level = "action"
 
         raw_output = self._call_llm(prompt)
         answer_output = self._extract_answer(raw_output)

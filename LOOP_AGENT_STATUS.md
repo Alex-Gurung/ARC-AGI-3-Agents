@@ -86,28 +86,28 @@ broke and the controller regresses to that level.
 
     ┌───────────────────────────────────────────────────────────────┐
     │                                                               │
-    │  STATE ENCODER ──────▶ state_text ──▶ Curiosity               │
-    │       │                    │     ──▶ Solver                   │
-    │       │                    └───────▶ Learner                  │
+    │  STATE ENCODER ──────▶ state_text ──▶ Curiosity             │
+    │       │                    │     ──▶ Solver                  │
+    │       │                    └───────▶ Learner                 │
     │       │                                                       │
-    │       └──────────────▶ diff_text  ──▶ Learner                 │
+    │       └──────────────▶ diff_text  ──▶ Learner               │
     │                                                               │
-    │  MEMORY ─────────────▶ memory_text ──▶ Curiosity              │
+    │  MEMORY ─────────────▶ memory_text ──▶ Curiosity            │
     │       ▲                          ──▶ Solver                  │
     │       │                          ──▶ Learner                 │
     │       │                                                       │
     │       ╚══════════════════════════════ Learner                 │
     │                                      (ADD/MODIFY/REMOVE)      │
     │                                                               │
-    │  SURPRISE ───────────▶ score ────────▶ Level Controller       │
+    │  SURPRISE ───────────▶ score ────────▶ Level Controller     │
     │                                                               │
-    │  Learner changed? ─────▶ phase updater (EXPLORE/EXPLOIT)      │
-    │  GAME_OVER ────────────▶ phase updater + diagnosis            │
+    │  Learner changed? ─────▶ phase updater (EXPLORE/EXPLOIT)     │
+    │  GAME_OVER ────────────▶ phase updater + diagnosis           │
     │                                                               │
-    │  LEVEL CONTROLLER ───▶ current_level ▶ Curiosity              │
+    │  LEVEL CONTROLLER ───▶ current_level ▶ Curiosity            │
     │                                  ──▶ Solver                  │
     │                                                               │
-    │  Curiosity/Solver ───▶ prediction ───▶ Learner                │
+    │  Curiosity/Solver ───▶ prediction ───▶ Learner              │
     │                                                               │
     └───────────────────────────────────────────────────────────────┘
 ```
@@ -123,13 +123,13 @@ These are executed open-loop, then evaluated as a batch.
          │
          ▼
     ┌─────────────────────────────────────────────────┐
-    │  action₁ ──▶ action₂ ──▶ action₃ ──▶ action₄   │
-    │                                                  │
-    │  executed sequentially, no learner between steps │
-    │                                                  │
-    │  interrupted if:                                 │
-    │    • terminal state (WIN / GAME_OVER)            │
-    │    • 2+ steps with no grid changes               │
+    │  action₁ ──▶ action₂ ──▶ action₃ ──▶ action₄ │
+    │                                                 │
+    │  executed sequentially, no learner between steps│
+    │                                                 │
+    │  interrupted if:                                │
+    │    • terminal state (WIN / GAME_OVER)           │
+    │    • 2+ steps with no grid changes              │
     └─────────────────────┬───────────────────────────┘
                           │
                           ▼
@@ -146,7 +146,7 @@ These are executed open-loop, then evaluated as a batch.
          │
          ▼
     ┌─────────────┐
-    │ Empty memory │ (0/50)
+    │ Empty memory│ (0/50)
     │             │
     │ EXPLORE     │  Learner fills entries:
     │ phase       │  observations, rules, actions
@@ -176,7 +176,7 @@ These are executed open-loop, then evaluated as a batch.
     │   strict → clear all            │
     │   carry  → keep all             │
     │   noisy  → delete 20%, jitter   │
-    │            confidence, shuffle   │
+    │            confidence, shuffle  │
     └─────────────────────────────────┘
 ```
 
@@ -200,12 +200,16 @@ The `LoopAgent` is now an explore-learn-exploit harness with:
   - plan is parsed into ordered subgoals
   - each active subgoal proposes a short action sequence from current state
   - sequence is executed open-loop, then evaluated at subgoal boundary
+  - in `EXPLOIT`, both `subgoal` and `plan` levels route through subgoal-sequence execution
 - Subgoal-boundary updates:
   - learner update, phase transition, and level-controller update happen at sequence boundaries
   - hard interrupts: terminal state or repeated no-change steps
 - Structured response contract:
   - prompts allow short reasoning but require a final `ANSWER: ...` line
   - parser extracts only the final `ANSWER:` payload for execution
+- Explicit stage context in prompts:
+  - Curiosity/Solver/Learner all receive `PHASE`, `LEVEL`, and `SUBGOAL_INDEX`
+  - Curiosity also receives `ACTIVE_PLAN` and `ACTIVE_SUBGOAL`
 - Configurable memory persistence mode on full reset:
   - `strict`: clear memory
   - `carry`: keep memory

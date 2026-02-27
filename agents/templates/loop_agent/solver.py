@@ -19,6 +19,10 @@ logger = logging.getLogger(__name__)
 SOLVER_PROMPT = """\
 You are solving a game. Use your knowledge to win.
 
+PHASE: {phase}
+LEVEL: {level}
+SUBGOAL_INDEX: {subgoal_index}
+
 STATE:
 {state_text}
 
@@ -38,6 +42,10 @@ ANSWER: ACTION6 x y"""
 
 SUBGOAL_SEQUENCE_PROMPT = """\
 You are solving a game and currently have an active subgoal.
+
+PHASE: {phase}
+LEVEL: {level}
+SUBGOAL_INDEX: {subgoal_index}
 
 STATE:
 {state_text}
@@ -73,6 +81,9 @@ class Solver:
         state_text: str,
         memory: Memory,
         available_actions: list[str],
+        phase: str = "EXPLOIT",
+        level: str = "action",
+        subgoal_index: int | None = None,
     ) -> dict[str, Any]:
         """Select an action based on current knowledge.
 
@@ -80,6 +91,9 @@ class Solver:
             state_text: Compressed state encoding.
             memory: Current memory.
             available_actions: List of available action names.
+            phase: Current high-level phase.
+            level: Current abstraction level.
+            subgoal_index: Active subgoal index, if any.
 
         Returns:
             dict with keys:
@@ -89,8 +103,12 @@ class Solver:
         """
         memory_text = memory.to_text() if memory else "empty"
         available_actions_str = ", ".join(available_actions)
+        stage_subgoal_index = str(subgoal_index) if subgoal_index is not None else "none"
 
         prompt = SOLVER_PROMPT.format(
+            phase=phase,
+            level=level,
+            subgoal_index=stage_subgoal_index,
             state_text=state_text,
             memory_text=memory_text,
             active_plan=self.active_plan or "none",
@@ -134,11 +152,18 @@ class Solver:
         memory: Memory,
         available_actions: list[str],
         max_steps: int = 4,
+        phase: str = "EXPLOIT",
+        level: str = "subgoal",
+        subgoal_index: int | None = None,
     ) -> dict[str, Any]:
         """Propose a short action sequence for the active subgoal."""
         memory_text = memory.to_text() if memory else "empty"
         available_actions_str = ", ".join(available_actions)
+        stage_subgoal_index = str(subgoal_index) if subgoal_index is not None else "none"
         prompt = SUBGOAL_SEQUENCE_PROMPT.format(
+            phase=phase,
+            level=level,
+            subgoal_index=stage_subgoal_index,
             state_text=state_text,
             memory_text=memory_text,
             active_plan=self.active_plan or "none",

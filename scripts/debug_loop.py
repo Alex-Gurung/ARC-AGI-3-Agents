@@ -328,7 +328,7 @@ def render_history(history: list[StepData], max_rows: int = 12) -> Panel:
     table.add_column("Level", width=8)
     table.add_column("Surpr", width=6, justify="right")
     table.add_column("ΔMem", width=5, justify="right")
-    table.add_column("Prediction", no_wrap=True, overflow="ellipsis", max_width=60)
+    table.add_column("Prediction", ratio=1, max_width=80)
 
     visible = history[-max_rows:]
     for sd in visible:

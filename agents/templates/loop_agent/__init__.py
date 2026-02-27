@@ -205,11 +205,16 @@ class LoopAgent(Agent):
     def _explore_action(self, state_text: str, available_actions: list[str]) -> GameAction:
         """Pick an action using curiosity."""
         level = self.level_controller.current_level
+        subgoal_index = self._active_subgoal_index if self._active_subgoal else None
         result = self.curiosity.propose_action(
             state_text=state_text,
             memory=self.memory,
             available_actions=available_actions,
             level=level,
+            phase=self.phase.value,
+            active_plan=self._active_plan_text,
+            active_subgoal=self._active_subgoal or "none",
+            subgoal_index=subgoal_index,
         )
 
         self.explore_actions_taken += 1
@@ -224,6 +229,10 @@ class LoopAgent(Agent):
                 memory=self.memory,
                 available_actions=available_actions,
                 level="action",
+                phase=self.phase.value,
+                active_plan=self._active_plan_text,
+                active_subgoal=self._active_subgoal or "none",
+                subgoal_index=self._active_subgoal_index if self._active_subgoal else None,
             )
         elif result["type"] == "subgoal":
             self._set_active_subgoal(result["value"])
@@ -233,6 +242,10 @@ class LoopAgent(Agent):
                 memory=self.memory,
                 available_actions=available_actions,
                 level="action",
+                phase=self.phase.value,
+                active_plan=self._active_plan_text,
+                active_subgoal=self._active_subgoal or "none",
+                subgoal_index=self._active_subgoal_index if self._active_subgoal else None,
             )
 
         self._last_prediction = result.get("prediction", "")
@@ -246,16 +259,28 @@ class LoopAgent(Agent):
         latest_frame: FrameData,
     ) -> GameAction:
         """Pick an action using solver."""
-        if self.USE_SUBGOAL_SEQUENCES and self.level_controller.current_level == "subgoal":
+        level = self.level_controller.current_level
+
+        if level == "plan":
+            self._ensure_active_plan(state_text, available_actions)
+            self._ensure_active_subgoal()
+
+        if self.USE_SUBGOAL_SEQUENCES and level in {"subgoal", "plan"}:
             self._ensure_active_plan(state_text, available_actions)
             self._ensure_active_subgoal()
 
             if self._active_subgoal:
+                stage_subgoal_index = (
+                    self._active_subgoal_index if self._active_subgoal else None
+                )
                 sequence = self.solver.propose_subgoal_actions(
                     state_text=state_text,
                     memory=self.memory,
                     available_actions=available_actions,
                     max_steps=self.SUBGOAL_MAX_ACTIONS,
+                    phase=self.phase.value,
+                    level=level,
+                    subgoal_index=stage_subgoal_index,
                 )
                 action_names = sequence.get("actions", [])
                 actions = [
@@ -273,10 +298,14 @@ class LoopAgent(Agent):
                     self._last_prediction = sequence.get("prediction", "")
                     return actions[0]
 
+        stage_subgoal_index = self._active_subgoal_index if self._active_subgoal else None
         result = self.solver.solve(
             state_text=state_text,
             memory=self.memory,
             available_actions=available_actions,
+            phase=self.phase.value,
+            level=level,
+            subgoal_index=stage_subgoal_index,
         )
         self._last_prediction = result.get("prediction", "")
         action_name = result.get("action", "RESET")
@@ -321,6 +350,9 @@ class LoopAgent(Agent):
                     memory=self.memory,
                     current_step=self.action_counter,
                     prediction=self._last_prediction,
+                    phase=self.phase.value,
+                    level=self.level_controller.current_level,
+                    subgoal_index=self._active_subgoal_index if self._active_subgoal else None,
                 )
             else:
                 logger.debug("Skipping learner update on this step")
@@ -400,6 +432,9 @@ class LoopAgent(Agent):
             memory=self.memory,
             current_step=self.action_counter,
             prediction=self._subgoal_sequence_expected or self._last_prediction,
+            phase=self.phase.value,
+            level=self.level_controller.current_level,
+            subgoal_index=self._active_subgoal_index if self._active_subgoal else None,
         )
 
         surprise_score = self.surprise.compute(
@@ -472,6 +507,10 @@ class LoopAgent(Agent):
             memory=self.memory,
             available_actions=available_actions,
             level="plan",
+            phase=self.phase.value,
+            active_plan=self._active_plan_text,
+            active_subgoal=self._active_subgoal or "none",
+            subgoal_index=self._active_subgoal_index if self._active_subgoal else None,
         )
         if result.get("type") == "plan":
             self._set_active_plan(
