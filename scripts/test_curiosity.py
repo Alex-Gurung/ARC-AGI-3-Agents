@@ -12,8 +12,8 @@ Usage:
 """
 
 import argparse
-import sys
 import os
+import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -22,6 +22,13 @@ from openai import OpenAI
 
 from agents.templates.loop_agent.curiosity import Curiosity
 from agents.templates.loop_agent.memory import Memory, MemoryEntry
+
+
+def render_raw(raw: str, show_full_raw: bool, preview_len: int = 80) -> str:
+    """Render raw output as single-line preview or full block."""
+    if show_full_raw:
+        return f"\n----- RAW START -----\n{raw}\n----- RAW END -----"
+    return raw[:preview_len]
 
 
 def make_sample_state() -> str:
@@ -58,7 +65,7 @@ def make_sample_memory() -> Memory:
     return mem
 
 
-def test_action_level(curiosity: Curiosity, n_trials: int = 5):
+def test_action_level(curiosity: Curiosity, n_trials: int = 5, show_full_raw: bool = False):
     """Test curiosity at action level."""
     print("=" * 60)
     print("TEST: Curiosity Action Level")
@@ -85,15 +92,17 @@ def test_action_level(curiosity: Curiosity, n_trials: int = 5):
         is_valid = result["value"] in available_actions
         valid_count += int(is_valid)
 
-        print(f"  Trial {i+1}: action={result['value']}, valid={is_valid}, "
-              f"latency={elapsed:.3f}s, raw={result['raw'][:80]}")
+        print(
+            f"  Trial {i+1}: action={result['value']}, valid={is_valid}, "
+            f"latency={elapsed:.3f}s, raw={render_raw(result['raw'], show_full_raw)}"
+        )
 
     print(f"\n  Valid outputs: {valid_count}/{n_trials} ({100*valid_count/n_trials:.0f}%)")
     print(f"  Avg latency: {sum(latencies)/len(latencies):.3f}s")
     print()
 
 
-def test_subgoal_level(curiosity: Curiosity, n_trials: int = 3):
+def test_subgoal_level(curiosity: Curiosity, n_trials: int = 3, show_full_raw: bool = False):
     """Test curiosity at subgoal level."""
     print("=" * 60)
     print("TEST: Curiosity Subgoal Level")
@@ -112,11 +121,14 @@ def test_subgoal_level(curiosity: Curiosity, n_trials: int = 3):
         )
         elapsed = time.time() - start
 
-        print(f"  Trial {i+1}: subgoal='{result['value'][:80]}', latency={elapsed:.3f}s")
+        subgoal_text = result["value"] if show_full_raw else result["value"][:80]
+        print(f"  Trial {i+1}: subgoal='{subgoal_text}', latency={elapsed:.3f}s")
+        if show_full_raw:
+            print(render_raw(result["raw"], show_full_raw))
     print()
 
 
-def test_plan_level(curiosity: Curiosity, n_trials: int = 3):
+def test_plan_level(curiosity: Curiosity, n_trials: int = 3, show_full_raw: bool = False):
     """Test curiosity at plan level."""
     print("=" * 60)
     print("TEST: Curiosity Plan Level")
@@ -134,11 +146,15 @@ def test_plan_level(curiosity: Curiosity, n_trials: int = 3):
         )
         elapsed = time.time() - start
 
-        print(f"  Trial {i+1}: plan='{result['value'][:120]}', latency={elapsed:.3f}s")
+        plan_text = result["value"] if show_full_raw else result["value"][:120]
+        print(f"  Trial {i+1}: plan='{plan_text}', latency={elapsed:.3f}s")
+        if show_full_raw:
+            print(f"    parsed_steps={result.get('steps', [])}")
+            print(render_raw(result["raw"], show_full_raw))
     print()
 
 
-def test_empty_memory(curiosity: Curiosity):
+def test_empty_memory(curiosity: Curiosity, show_full_raw: bool = False):
     """Test curiosity with no memory (fresh start)."""
     print("=" * 60)
     print("TEST: Curiosity with Empty Memory")
@@ -155,7 +171,7 @@ def test_empty_memory(curiosity: Curiosity):
         level="action",
     )
 
-    print(f"  Action: {result['value']}, raw: {result['raw'][:80]}")
+    print(f"  Action: {result['value']}, raw: {render_raw(result['raw'], show_full_raw)}")
     print()
 
 
@@ -164,6 +180,11 @@ if __name__ == "__main__":
     parser.add_argument("--base-url", default="http://localhost:8000/v1")
     parser.add_argument("--model", default="google/gemma-3-1b-it")
     parser.add_argument("--n-trials", type=int, default=5)
+    parser.add_argument(
+        "--show-full-raw",
+        action="store_true",
+        help="Print full raw model outputs instead of short previews",
+    )
     args = parser.parse_args()
 
     client = OpenAI(base_url=args.base_url, api_key="dummy")
@@ -171,9 +192,9 @@ if __name__ == "__main__":
 
     print(f"Using VLLM at {args.base_url} with model {args.model}\n")
 
-    test_action_level(curiosity, args.n_trials)
-    test_subgoal_level(curiosity, min(args.n_trials, 3))
-    test_plan_level(curiosity, min(args.n_trials, 3))
-    test_empty_memory(curiosity)
+    test_action_level(curiosity, args.n_trials, args.show_full_raw)
+    test_subgoal_level(curiosity, min(args.n_trials, 3), args.show_full_raw)
+    test_plan_level(curiosity, min(args.n_trials, 3), args.show_full_raw)
+    test_empty_memory(curiosity, args.show_full_raw)
 
     print("All Curiosity tests complete!")

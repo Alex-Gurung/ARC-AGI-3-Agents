@@ -80,6 +80,8 @@ class Learner:
         self.client = client
         self.model = model
         self.consecutive_nones: int = 0  # track how many NONE ops in a row
+        self.last_raw_output: str = ""
+        self.last_answer_output: str = ""
 
     def update(
         self,
@@ -118,6 +120,8 @@ class Learner:
 
         raw_output = self._call_llm(prompt)
         answer_output = self._extract_answer(raw_output)
+        self.last_raw_output = raw_output
+        self.last_answer_output = answer_output
 
         # Parse and apply the memory operation
         operation = parse_memory_operation(answer_output, current_step)
@@ -156,6 +160,8 @@ class Learner:
 
         raw_output = self._call_llm(prompt)
         answer_output = self._extract_answer(raw_output)
+        self.last_raw_output = raw_output
+        self.last_answer_output = answer_output
         return self._parse_diagnosis(answer_output)
 
     def _call_llm(self, prompt: str) -> str:

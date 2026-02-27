@@ -11,8 +11,8 @@ Usage:
 """
 
 import argparse
-import sys
 import os
+import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -23,7 +23,14 @@ from agents.templates.loop_agent.learner import Learner
 from agents.templates.loop_agent.memory import Memory, MemoryEntry
 
 
-def test_first_action_discovery(learner: Learner):
+def render_raw(raw: str, show_full_raw: bool, preview_len: int = 120) -> str:
+    """Render raw output as single-line preview or full block."""
+    if show_full_raw:
+        return f"\n----- RAW START -----\n{raw}\n----- RAW END -----"
+    return raw[:preview_len]
+
+
+def test_first_action_discovery(learner: Learner, show_full_raw: bool = False):
     """Test learning from the very first action (no prior memory)."""
     print("=" * 60)
     print("TEST: First Action Discovery")
@@ -67,11 +74,13 @@ SUMMARY: 64x64 grid
 
     print(f"  Memory changed: {changed}")
     print(f"  Latency: {elapsed:.3f}s")
+    print(f"  Raw: {render_raw(learner.last_raw_output, show_full_raw)}")
+    print(f"  Parsed answer: {learner.last_answer_output}")
     print(f"  Memory state: {memory.to_text()}")
     print()
 
 
-def test_confirming_knowledge(learner: Learner):
+def test_confirming_knowledge(learner: Learner, show_full_raw: bool = False):
     """Test learner when action confirms existing knowledge."""
     print("=" * 60)
     print("TEST: Confirming Existing Knowledge")
@@ -113,11 +122,13 @@ CHANGED (2 cells):
 
     print(f"  Memory changed: {changed}")
     print(f"  Latency: {elapsed:.3f}s")
+    print(f"  Raw: {render_raw(learner.last_raw_output, show_full_raw)}")
+    print(f"  Parsed answer: {learner.last_answer_output}")
     print(f"  Memory state: {memory.to_text()}")
     print()
 
 
-def test_no_change(learner: Learner):
+def test_no_change(learner: Learner, show_full_raw: bool = False):
     """Test learner when nothing happened (wall collision)."""
     print("=" * 60)
     print("TEST: No Change (Wall Collision)")
@@ -152,11 +163,13 @@ DIFF: no changes"""
 
     print(f"  Memory changed: {changed}")
     print(f"  Latency: {elapsed:.3f}s")
+    print(f"  Raw: {render_raw(learner.last_raw_output, show_full_raw)}")
+    print(f"  Parsed answer: {learner.last_answer_output}")
     print(f"  Memory state: {memory.to_text()}")
     print()
 
 
-def test_game_over_discovery(learner: Learner):
+def test_game_over_discovery(learner: Learner, show_full_raw: bool = False):
     """Test learner when game over happens."""
     print("=" * 60)
     print("TEST: Game Over Discovery")
@@ -201,11 +214,13 @@ CHANGED (5 cells):
 
     print(f"  Memory changed: {changed}")
     print(f"  Latency: {elapsed:.3f}s")
+    print(f"  Raw: {render_raw(learner.last_raw_output, show_full_raw)}")
+    print(f"  Parsed answer: {learner.last_answer_output}")
     print(f"  Memory state: {memory.to_text()}")
     print()
 
 
-def test_diagnosis(learner: Learner):
+def test_diagnosis(learner: Learner, show_full_raw: bool = False):
     """Test solver diagnosis."""
     print("=" * 60)
     print("TEST: Solver Diagnosis")
@@ -233,6 +248,8 @@ def test_diagnosis(learner: Learner):
 
     print(f"  Diagnosis: {result}")
     print(f"  Latency: {elapsed:.3f}s")
+    print(f"  Raw: {render_raw(learner.last_raw_output, show_full_raw)}")
+    print(f"  Parsed answer: {learner.last_answer_output}")
     print()
 
 
@@ -240,6 +257,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", default="http://localhost:8000/v1")
     parser.add_argument("--model", default="google/gemma-3-1b-it")
+    parser.add_argument(
+        "--show-full-raw",
+        action="store_true",
+        help="Print full raw model outputs instead of short previews",
+    )
     args = parser.parse_args()
 
     client = OpenAI(base_url=args.base_url, api_key="dummy")
@@ -247,10 +269,10 @@ if __name__ == "__main__":
 
     print(f"Using VLLM at {args.base_url} with model {args.model}\n")
 
-    test_first_action_discovery(learner)
-    test_confirming_knowledge(learner)
-    test_no_change(learner)
-    test_game_over_discovery(learner)
-    test_diagnosis(learner)
+    test_first_action_discovery(learner, args.show_full_raw)
+    test_confirming_knowledge(learner, args.show_full_raw)
+    test_no_change(learner, args.show_full_raw)
+    test_game_over_discovery(learner, args.show_full_raw)
+    test_diagnosis(learner, args.show_full_raw)
 
     print("All Learner tests complete!")
