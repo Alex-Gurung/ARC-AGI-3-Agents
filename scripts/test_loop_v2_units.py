@@ -147,6 +147,24 @@ def test_expectation_parser() -> None:
     print("  PASS\n")
 
 
+def test_learner_operation_filtering() -> None:
+    print("=" * 60)
+    print("TEST: Learner filters rationale-only lines")
+    print("=" * 60)
+    learner = Learner(client=None, model="dummy")  # type: ignore[arg-type]
+    noisy = """RATIONALE:
+The prediction partially matched.
+No removal is needed.
+ANSWER:
+RATIONALE: update one lesson.
+ADD [ACTION] ACTION2 moves wave right by 1 cell | observed in 3 transitions (0.7)
+"""
+    ops = learner._extract_operation_lines(noisy)
+    assert len(ops) == 1
+    assert ops[0].startswith("ADD [ACTION]")
+    print("  PASS\n")
+
+
 def test_diagnosis_directed_level() -> None:
     print("=" * 60)
     print("TEST: Diagnosis-directed level routing")
@@ -326,6 +344,7 @@ if __name__ == "__main__":
     test_soft_reset_step_skip_gate()
     test_level_regression()
     test_expectation_parser()
+    test_learner_operation_filtering()
     test_diagnosis_directed_level()
     test_plan_end_only_diagnosis()
     test_game_over_diagnostic_override()

@@ -76,7 +76,7 @@ Examples:
 - ADD [GOAL] Hypothesis: level completes when black square touches yellow square | completion followed contact event while score/state changed (0.55)
 - NONE
 
-Think step by step, then output your operations:
+Think step by step, then output ONLY operations (no rationale/prose labels).
 ANSWER:
 <one or more operations, one per line>"""
 
@@ -178,14 +178,14 @@ class Learner:
         self.last_answer_output = answer_output
 
         # Parse and apply multiple operations (one per line)
+        operation_lines = self._extract_operation_lines(answer_output)
+        if not operation_lines and answer_output.strip():
+            logger.debug("Learner produced no operation lines; treating output as NONE")
+
         any_changed = False
-        for line in answer_output.strip().splitlines():
-            line = line.strip()
-            if not line or line.upper() == "NONE":
+        for line in operation_lines:
+            if line.upper() == "NONE":
                 continue
-            # Skip lines that look like markdown list bullets wrapping a real op
-            if line.startswith("- "):
-                line = line[2:].strip()
             operation = parse_memory_operation(line, current_step)
             changed = apply_memory_operation(memory, operation, current_step)
             if changed:
@@ -251,20 +251,74 @@ class Learner:
         self.last_answer_output = answer_output
         return self._parse_expectation_assessment(answer_output)
 
-    def _call_llm(self, prompt: str) -> str:
+    def _call_llm(
+        self,
+        prompt: str,
+        max_tokens: int = 512,
+        temperature: float = 0.3,
+    ) -> str:
         """Call the LLM with a single prompt."""
         try:
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=1024,
-                temperature=1.0,
+                max_tokens=max_tokens,
+                temperature=temperature,
             )
             content = response.choices[0].message.content or ""
             return content.strip()
         except Exception as e:
             logger.error(f"Learner LLM call failed: {e}")
             return "NONE"
+
+    @staticmethod
+    def _is_operation_line(line: str) -> bool:
+        """Return True iff the line starts with a supported operation token."""
+        return re.match(r"^(ADD|MODIFY|REMOVE|NONE)\b", line, flags=re.IGNORECASE) is not None
+
+    def _extract_operation_lines(self, text: str) -> list[str]:
+        """Extract strict memory-operation lines from noisy model output.
+
+        Keeps strict op syntax while ignoring rationale prose.
+        """
+        operations: list[str] = []
+        saw_none = False
+
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+
+            # Strip common wrappers without loosening core op schema.
+            line = re.sub(r"(?i)^\s*ANSWER\s*:\s*", "", line).strip()
+            line = re.sub(r"^\s*(?:[-*]|\d+[.)])\s*", "", line).strip()
+            if not line:
+                continue
+
+            # Support compact list formats: "ADD ...; MODIFY ...".
+            fragments = [frag.strip() for frag in line.split(";") if frag.strip()]
+            for fragment in fragments:
+                cleaned = re.sub(r"^\s*(?:[-*]|\d+[.)])\s*", "", fragment).strip()
+                cleaned = re.sub(r"(?i)^\s*ANSWER\s*:\s*", "", cleaned).strip()
+                if not cleaned:
+                    continue
+
+                # Light normalization for common model slip: "ADD[TYPE] ..."
+                if cleaned.upper().startswith("ADD["):
+                    cleaned = f"ADD {cleaned[3:]}"
+
+                if cleaned.upper() == "NONE":
+                    saw_none = True
+                    continue
+
+                if self._is_operation_line(cleaned):
+                    operations.append(cleaned)
+
+        if operations:
+            return operations
+        if saw_none:
+            return ["NONE"]
+        return []
 
     def _parse_diagnosis(self, raw_output: str) -> Optional[dict]:
         """Parse diagnosis output into level and entry index."""
