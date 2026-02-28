@@ -127,9 +127,8 @@ def test_text_serialization():
     print(f"  Output:\n{text}")
     print()
 
-    assert "[idx=0]" in text
-    assert "[idx=1]" in text
-    assert "id=M" in text
+    assert "[0]" in text
+    assert "[1]" in text
     assert "ACTION" in text
     assert "VOCAB" in text
     print("  PASS\n")
@@ -153,7 +152,7 @@ def test_parse_operations():
 
     # Test MODIFY
     result = parse_memory_operation(
-        "MODIFY 3 Energy decreases by 2 per move, not 1 | counted cells more carefully (0.6)",
+        "MODIFY [3] Energy decreases by 2 per move, not 1 | counted cells more carefully (0.6)",
         current_step=10,
     )
     assert result["op"] == "modify"
@@ -163,7 +162,7 @@ def test_parse_operations():
 
     # Test REMOVE
     result = parse_memory_operation(
-        "REMOVE 5 | this was contradicted when ACTION3 moved us right",
+        "REMOVE [5] | this was contradicted when ACTION3 moved us right",
         current_step=15,
     )
     assert result["op"] == "remove"
@@ -209,7 +208,7 @@ def test_apply_operations():
 
     # Apply MODIFY
     op = parse_memory_operation(
-        "MODIFY 0 Black cells and dark gray cells block movement | tested with both colors (0.9)",
+        "MODIFY [0] Black cells and dark gray cells block movement | tested with both colors (0.9)",
         current_step=3,
     )
     changed = apply_memory_operation(mem, op, current_step=3)

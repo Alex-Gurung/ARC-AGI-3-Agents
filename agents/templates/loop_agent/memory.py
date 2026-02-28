@@ -13,9 +13,9 @@ from typing import Literal, Optional
 
 logger = logging.getLogger(__name__)
 
-MemoryType = Literal["ACTION", "RULE", "SUBGOAL", "PLAN", "OBSERVATION", "VOCAB"]
+MemoryType = Literal["ACTION", "RULE", "GOAL", "SUBGOAL", "PLAN", "OBSERVATION", "VOCAB"]
 
-VALID_TYPES: set[str] = {"ACTION", "RULE", "SUBGOAL", "PLAN", "OBSERVATION", "VOCAB"}
+VALID_TYPES: set[str] = {"ACTION", "RULE", "GOAL", "SUBGOAL", "PLAN", "OBSERVATION", "VOCAB"}
 
 
 @dataclass
@@ -32,9 +32,8 @@ class MemoryEntry:
 
     def to_text(self) -> str:
         """Serialize to single-line text for LLM context."""
-        id_text = f"[id={self.memory_id}]" if self.memory_id else ""
         return (
-            f"{id_text}[{self.type}] {self.content} | "
+            f"[{self.type}] {self.content} | "
             f"{self.justification} (conf: {self.confidence:.2f})"
         )
 
@@ -202,7 +201,7 @@ class Memory:
             return "MEMORY (0/50 entries): empty"
         lines = [f"MEMORY ({len(self.entries)}/{self.MAX_ENTRIES} entries):"]
         for i, entry in enumerate(self.entries):
-            lines.append(f"[idx={i}]{entry.to_text()}")
+            lines.append(f"[{i}] {entry.to_text()}")
         return "\n".join(lines)
 
     def to_text_with_indices(self) -> str:
@@ -262,8 +261,8 @@ def parse_memory_operation(text: str, current_step: int) -> dict:
 
     Expected formats:
         ADD [TYPE] content | justification (confidence)
-        MODIFY index content | justification (confidence)
-        REMOVE index | reason
+        MODIFY [index] content | justification (confidence)
+        REMOVE [index] | reason
         NONE
 
     Returns dict with 'op' key ('add', 'modify', 'remove', 'none', 'error')
@@ -302,7 +301,7 @@ def parse_memory_operation(text: str, current_step: int) -> dict:
 
     # Try MODIFY
     modify_match = re.match(
-        r"MODIFY\s+([Mm]\d+|\d+)\s+(.+?)\s*\|\s*(.+?)\s*"
+        r"MODIFY\s+\[(\d+)\]\s+(.+?)\s*\|\s*(.+?)\s*"
         r"\(\s*(?:conf(?:idence)?\s*:\s*)?(\d*\.?\d+)\s*\)\s*$",
         text,
         re.IGNORECASE,
@@ -310,11 +309,9 @@ def parse_memory_operation(text: str, current_step: int) -> dict:
     if modify_match:
         confidence = float(modify_match.group(4))
         confidence = max(0.0, min(1.0, confidence))
-        ref = modify_match.group(1)
-        index = int(ref) if ref.isdigit() else None
+        index = int(modify_match.group(1))
         return {
             "op": "modify",
-            "ref": ref,
             "index": index,
             "content": modify_match.group(2).strip(),
             "justification": modify_match.group(3).strip(),
@@ -323,16 +320,14 @@ def parse_memory_operation(text: str, current_step: int) -> dict:
 
     # Try REMOVE
     remove_match = re.match(
-        r"REMOVE\s+([Mm]\d+|\d+)(?:\s*\|\s*(.+))?$",
+        r"REMOVE\s+\[(\d+)\](?:\s*\|\s*(.+))?$",
         text,
         re.IGNORECASE,
     )
     if remove_match:
-        ref = remove_match.group(1)
-        index = int(ref) if ref.isdigit() else None
+        index = int(remove_match.group(1))
         return {
             "op": "remove",
-            "ref": ref,
             "index": index,
             "reason": (remove_match.group(2) or "").strip(),
         }
@@ -354,7 +349,7 @@ def apply_memory_operation(memory: Memory, operation: dict, current_step: int) -
 
     if op == "modify":
         return memory.modify(
-            index=operation.get("ref", operation.get("index")),
+            index=operation.get("index"),
             content=operation["content"],
             justification=operation["justification"],
             confidence=operation["confidence"],
@@ -363,7 +358,7 @@ def apply_memory_operation(memory: Memory, operation: dict, current_step: int) -
 
     if op == "remove":
         removed = memory.remove(
-            index=operation.get("ref", operation.get("index")),
+            index=operation.get("index"),
             reason=operation.get("reason", ""),
         )
         return removed is not None

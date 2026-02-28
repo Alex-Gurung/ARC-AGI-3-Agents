@@ -254,14 +254,15 @@ The `LoopAgent` is now an explore-learn-exploit harness with:
 
 ## Memory Model
 
-Memory remains list-based, but each entry now has a stable ID:
+Memory remains list-based with explicit numeric indices:
 
-- Display format: `[idx=<n>][id=M####][TYPE] ...`
-- Operations support index or ID refs:
-  - `MODIFY 3 ...` or `MODIFY M0003 ...`
-  - `REMOVE 3 ...` or `REMOVE M0003 ...`
+- Display format: `[<n>] [TYPE] ...`
+- Core lesson types: `ACTION`, `RULE`, `GOAL`, `SUBGOAL`, `PLAN`, `OBSERVATION`, `VOCAB`
+- Operations use bracketed numeric refs:
+  - `MODIFY [3] ...`
+  - `REMOVE [3] ...`
 - Parser accepts confidence formats `(0.8)` and `(conf: 0.8)`.
-- Internal references should prefer IDs for stability.
+- Learner prompt enforces strict bracketed index references.
 
 ## Key Runtime Env Vars
 
@@ -281,7 +282,7 @@ Memory remains list-based, but each entry now has a stable ID:
 
 1. Add a strict evaluation preset script (forces blank memory at new attempts and fixed deterministic settings).
 2. Add stronger subgoal sequence stop conditions (e.g. explicit `subgoal_done` classifier, surprise guard).
-3. Add stable-ID-aware learner prompt examples (`REMOVE M####`, `MODIFY M####`) so model natively uses IDs.
+3. Add more hard negatives for malformed memory ops so strict bracket-index formatting is reinforced in training.
 4. Add calibration tooling for surprise scaling (for metrics/RL rewards) per game family and memory mode.
 5. Integrate `training/` grouped-sampling utilities with full env-replica prefix replay.
 6. Implement warm/cold/noisy rollout mix for training data generation:

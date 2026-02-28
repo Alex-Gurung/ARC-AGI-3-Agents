@@ -79,6 +79,13 @@ class LoopAgent(Agent):
     LEARNER_UPDATE_INTERVAL: int = int(os.environ.get("LEARNER_UPDATE_INTERVAL", "1"))
     KEYFRAME_INTERVAL: int = int(os.environ.get("STATE_KEYFRAME_INTERVAL", "10"))
     MISMATCH_CONF_THRESHOLD: float = float(os.environ.get("MISMATCH_CONF_THRESHOLD", "0.7"))
+    MODE_MIN_BOUNDARIES_ACTION: int = int(os.environ.get("MODE_MIN_BOUNDARIES_ACTION", "6"))
+    MODE_MIN_BOUNDARIES_SUBGOAL: int = int(os.environ.get("MODE_MIN_BOUNDARIES_SUBGOAL", "3"))
+    MODE_MIN_BOUNDARIES_PLAN: int = int(os.environ.get("MODE_MIN_BOUNDARIES_PLAN", "2"))
+    MODE_SWITCH_COOLDOWN_BOUNDARIES: int = int(
+        os.environ.get("MODE_SWITCH_COOLDOWN_BOUNDARIES", "2")
+    )
+    SOLVE_MIN_LESSON_CONF: float = float(os.environ.get("SOLVE_MIN_LESSON_CONF", "0.6"))
 
     # Noisy-memory mode controls
     NOISY_DELETE_FRACTION: float = float(os.environ.get("NOISY_DELETE_FRACTION", "0.2"))
@@ -144,6 +151,13 @@ class LoopAgent(Agent):
         self._plan_attempt_start_state: Optional[str] = None
         self._plan_attempt_start_grid: Optional[list[list[int]]] = None
         self._last_boundary_diagnosis_level: str = "none"
+        self._mode_boundary_counts: dict[str, int] = {
+            DecisionMode.LEARN_ACTION.value: 0,
+            DecisionMode.LEARN_SUBGOAL.value: 0,
+            DecisionMode.LEARN_PLAN.value: 0,
+            DecisionMode.SOLVE.value: 0,
+        }
+        self._mode_switch_cooldown_remaining: int = 0
 
     @trace_agent_session
     def main(self) -> None:
@@ -810,6 +824,8 @@ class LoopAgent(Agent):
         self.current_mode = mode
         self.phase = Phase.EXPLOIT if mode == DecisionMode.SOLVE else Phase.EXPLORE
         self.level_controller.current_level = self._mode_to_level(mode)
+        self._mode_switch_cooldown_remaining = max(0, self.MODE_SWITCH_COOLDOWN_BOUNDARIES)
+        self._mode_boundary_counts[mode.value] = 0
         logger.info("Mode transition: %s -> %s (%s)", old_mode.value, mode.value, reason)
 
         if mode == DecisionMode.LEARN_ACTION:
@@ -828,6 +844,8 @@ class LoopAgent(Agent):
         frame_after: FrameData,
         diagnosis_level: str | None,
     ) -> None:
+        self._mode_boundary_counts[self.current_mode.value] += 1
+
         if frame_after.state == GameState.GAME_OVER:
             diagnosis = self.learner.diagnose(
                 expected=self._last_prediction or "continued progress",
@@ -848,6 +866,14 @@ class LoopAgent(Agent):
             )
             return
 
+        if self._mode_switch_cooldown_remaining > 0:
+            self._mode_switch_cooldown_remaining -= 1
+            logger.debug(
+                "Skipping mode-router during cooldown (%d boundaries remaining)",
+                self._mode_switch_cooldown_remaining,
+            )
+            return
+
         available_actions = self._get_available_action_names(frame_after)
         mode_result = self.curiosity.propose_mode(
             state_text=state_text,
@@ -864,7 +890,67 @@ class LoopAgent(Agent):
             target_mode = DecisionMode(proposed_mode)
         except ValueError:
             target_mode = self.current_mode
+        target_mode = self._gate_router_mode(target_mode)
         self._set_mode(target_mode, reason="mode router decision")
+
+    def _gate_router_mode(self, proposed_mode: DecisionMode) -> DecisionMode:
+        """Apply lightweight evidence gates before accepting router mode transitions."""
+        current = self.current_mode
+        if proposed_mode == current:
+            return current
+
+        # Force stepwise upward progression for router choices.
+        stepwise_up = {
+            DecisionMode.LEARN_ACTION: DecisionMode.LEARN_SUBGOAL,
+            DecisionMode.LEARN_SUBGOAL: DecisionMode.LEARN_PLAN,
+            DecisionMode.LEARN_PLAN: DecisionMode.SOLVE,
+            DecisionMode.SOLVE: DecisionMode.SOLVE,
+        }
+        if current != DecisionMode.SOLVE and proposed_mode == DecisionMode.SOLVE and current != DecisionMode.LEARN_PLAN:
+            proposed_mode = stepwise_up[current]
+        if current == DecisionMode.LEARN_ACTION and proposed_mode == DecisionMode.LEARN_PLAN:
+            proposed_mode = DecisionMode.LEARN_SUBGOAL
+        if current == DecisionMode.LEARN_SUBGOAL and proposed_mode == DecisionMode.SOLVE:
+            proposed_mode = DecisionMode.LEARN_PLAN
+
+        boundaries_here = self._mode_boundary_counts.get(current.value, 0)
+        min_required = {
+            DecisionMode.LEARN_ACTION: self.MODE_MIN_BOUNDARIES_ACTION,
+            DecisionMode.LEARN_SUBGOAL: self.MODE_MIN_BOUNDARIES_SUBGOAL,
+            DecisionMode.LEARN_PLAN: self.MODE_MIN_BOUNDARIES_PLAN,
+            DecisionMode.SOLVE: 0,
+        }[current]
+        moving_up = (
+            current == DecisionMode.LEARN_ACTION and proposed_mode in (DecisionMode.LEARN_SUBGOAL, DecisionMode.LEARN_PLAN, DecisionMode.SOLVE)
+        ) or (
+            current == DecisionMode.LEARN_SUBGOAL and proposed_mode in (DecisionMode.LEARN_PLAN, DecisionMode.SOLVE)
+        ) or (
+            current == DecisionMode.LEARN_PLAN and proposed_mode == DecisionMode.SOLVE
+        )
+        if moving_up and boundaries_here < min_required:
+            logger.debug(
+                "Router mode gated: %s -> %s requires >= %d boundaries, have %d",
+                current.value,
+                proposed_mode.value,
+                min_required,
+                boundaries_here,
+            )
+            return current
+
+        if proposed_mode == DecisionMode.SOLVE and not self._has_solve_ready_lessons():
+            logger.debug("Router mode gated: SOLVE blocked (insufficient GOAL/PLAN lesson confidence)")
+            return current
+
+        return proposed_mode
+
+    def _has_solve_ready_lessons(self) -> bool:
+        """Return True when memory has at least one credible GOAL/PLAN lesson."""
+        if not self.memory or not self.memory.entries:
+            return False
+        for entry in self.memory.entries:
+            if entry.type in {"GOAL", "PLAN"} and entry.confidence >= self.SOLVE_MIN_LESSON_CONF:
+                return True
+        return False
 
     def _run_mode_diagnosis(
         self,
@@ -934,6 +1020,13 @@ class LoopAgent(Agent):
         self._last_state_text = None
         self._current_state_text = None
         self._levels_completed_at_reset = 0
+        self._mode_boundary_counts = {
+            DecisionMode.LEARN_ACTION.value: 0,
+            DecisionMode.LEARN_SUBGOAL.value: 0,
+            DecisionMode.LEARN_PLAN.value: 0,
+            DecisionMode.SOLVE.value: 0,
+        }
+        self._mode_switch_cooldown_remaining = 0
 
     def _on_soft_reset(self) -> None:
         """Handle a control-flow reset after exploratory subgoal attempts."""
@@ -968,6 +1061,13 @@ class LoopAgent(Agent):
         self._last_boundary_diagnosis_level = "none"
         self._last_state_text = None
         self._current_state_text = None
+        self._mode_boundary_counts = {
+            DecisionMode.LEARN_ACTION.value: 0,
+            DecisionMode.LEARN_SUBGOAL.value: 0,
+            DecisionMode.LEARN_PLAN.value: 0,
+            DecisionMode.SOLVE.value: 0,
+        }
+        self._mode_switch_cooldown_remaining = 0
 
     def _get_available_action_names(self, frame: FrameData) -> list[str]:
         """Build action name list from frame.available_actions."""

@@ -137,13 +137,13 @@ def test_expectation_parser() -> None:
     print("=" * 60)
     learner = Learner(client=None, model="dummy")  # type: ignore[arg-type]
     parsed = learner._parse_expectation_assessment(
-        "verdict=unexpected conf=0.82 level=subgoal ref=M0012"
+        "verdict=unexpected conf=0.82 level=subgoal ref=12"
     )
     assert parsed is not None
     assert parsed["verdict"] == "unexpected"
     assert abs(parsed["confidence"] - 0.82) < 1e-6
     assert parsed["level"] == "subgoal"
-    assert parsed["entry_ref"] == "M0012"
+    assert parsed["entry_ref"] == "12"
     print("  PASS\n")
 
 

@@ -64,6 +64,7 @@ ARC_PALETTE: dict[int, tuple[int, int, int]] = {
 MEMORY_TYPE_COLORS: dict[str, str] = {
     "ACTION": "bright_blue",
     "RULE": "yellow",
+    "GOAL": "bright_cyan",
     "VOCAB": "bright_green",
     "SUBGOAL": "cyan",
     "PLAN": "bright_magenta",
