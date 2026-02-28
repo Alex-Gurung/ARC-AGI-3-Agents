@@ -220,36 +220,26 @@ CHANGED (5 cells):
     print()
 
 
-def test_diagnosis(learner: Learner, show_full_raw: bool = False):
-    """Test solver diagnosis."""
+def test_judge_similarity(learner: Learner, show_full_raw: bool = False):
+    """Test judge similarity scoring."""
     print("=" * 60)
-    print("TEST: Solver Diagnosis")
+    print("TEST: Judge Similarity")
     print("=" * 60)
 
-    memory = Memory()
-    memory.add(MemoryEntry(
-        type="ACTION", content="ACTION1 moves player up",
-        justification="observed", confidence=0.9,
-        created_step=0, last_modified_step=0,
-    ))
-    memory.add(MemoryEntry(
-        type="PLAN", content="1) move to door 2) touch door to win",
-        justification="guessed from layout", confidence=0.4,
-        created_step=5, last_modified_step=5,
-    ))
+    predicted = "The blue object at row 5 col 3 should move up by 1 row to row 4 col 3. The dark walls remain unchanged. The rest of the grid stays black."
+    observed = "The blue object moved from row 5 col 3 to row 4 col 3. All dark wall cells remained in place. No other changes occurred."
 
     start = time.time()
-    result = learner.diagnose(
-        expected="touching the door should win",
-        actual="GAME_OVER - touching the door killed us",
-        memory=memory,
-    )
+    similarity = learner.judge_similarity(predicted, observed)
     elapsed = time.time() - start
 
-    print(f"  Diagnosis: {result}")
+    surprise = (6 - similarity) / 5.0
+    print(f"  Similarity: {similarity}/5")
+    print(f"  Surprise: {surprise:.3f}")
     print(f"  Latency: {elapsed:.3f}s")
     print(f"  Raw: {render_raw(learner.last_raw_output, show_full_raw)}")
     print(f"  Parsed answer: {learner.last_answer_output}")
+    assert 1 <= similarity <= 5, f"Similarity {similarity} out of range"
     print()
 
 
@@ -273,6 +263,6 @@ if __name__ == "__main__":
     test_confirming_knowledge(learner, args.show_full_raw)
     test_no_change(learner, args.show_full_raw)
     test_game_over_discovery(learner, args.show_full_raw)
-    test_diagnosis(learner, args.show_full_raw)
+    test_judge_similarity(learner, args.show_full_raw)
 
     print("All Learner tests complete!")

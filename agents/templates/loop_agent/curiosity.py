@@ -137,6 +137,7 @@ There are four modes, each targeting a different level of understanding:
 - SOLVE: we have enough understanding at all levels — execute our best strategy now
 
 When in doubt, pick the LOWEST level with weak understanding — filling low-level gaps first is more efficient.
+High surprise at a level means our rulebook is weak there — we can't predict what happens. Use this to decide where to focus learning.
 
 Here is your current status:
 CURRENT_MODE: {current_mode}
@@ -147,6 +148,10 @@ ACTIVE_SUBGOAL: {active_subgoal}
 RULEBOOK_STATUS: {rulebook_status}
 MISSING_ACTION_LESSONS: {missing_action_lessons}
 SEMANTIC_DISCOVERY_STATUS: {semantic_discovery_status}
+GAME_EVENT: {game_event}
+
+SURPRISE_HISTORY:
+{surprise_summary}
 
 RECENT_ACTIONS:
 {action_history}
@@ -158,6 +163,7 @@ Examples of good reasoning (pick exactly one mode):
 - "All actions are known but we've never tried combining them to reach the exit → ANSWER: LEARN_SUBGOAL"
 - "We can reach objects but don't know what the win condition is → ANSWER: LEARN_PLAN"
 - "We have high-confidence entries at every level and a working plan → ANSWER: SOLVE"
+- "GAME_OVER just happened and action-level surprise is high → ANSWER: LEARN_ACTION"
 
 Now look at the memory and status above. Identify the weakest area, then pick exactly one mode.
 ANSWER: """
@@ -389,6 +395,8 @@ class Curiosity:
         missing_action_lessons: str = "none",
         semantic_discovery_status: str = "none",
         action_history: str = "no actions taken yet",
+        game_event: str = "none",
+        surprise_summary: str = "no data",
     ) -> dict[str, Any]:
         """Choose the next top-level control mode based on knowledge gaps."""
         memory_text = memory.to_text() if memory else "empty"
@@ -403,6 +411,8 @@ class Curiosity:
             semantic_discovery_status=semantic_discovery_status,
             memory_text=memory_text,
             action_history=action_history,
+            game_event=game_event,
+            surprise_summary=surprise_summary,
         )
         raw_output = self._call_llm(prompt)
         answer_output = self._extract_answer(raw_output)

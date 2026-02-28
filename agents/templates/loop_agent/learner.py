@@ -1,16 +1,19 @@
 """Learner component for the LoopAgent.
 
-Called after every action with before/after states. Produces memory
-operations (ADD/REMOVE/MODIFY/NONE) based on observed changes.
+Contains multiple "agents" (same model, different prompts):
+- Scribe (update): observes transitions, writes memory/rulebook entries
+- World Model (predict_outcome): predicts next state from current state + action + memory
+- Observer (observe_transition): describes what actually happened in a transition
+- Judge (judge_similarity): scores how well a prediction matched observation (1-5)
+- Consolidator (consolidate): periodic memory cleanup
 
-The model sees raw BEFORE/AFTER/DIFF evidence and judges from that —
-the surprise score is NOT passed to the model (it's a system-level signal).
+Each LLM call is an atomic unit for RL credit assignment.
+Surprise = 6 - judge_similarity (low similarity = high surprise).
 """
 
 import logging
 import os
 import re
-from typing import Optional
 
 from openai import OpenAI
 
@@ -75,7 +78,15 @@ RECENT_ACTIONS:
 
 {memory_text}
 
-Compare PREDICTION with AFTER/DIFF. Did the outcome match? Did this reveal something new, confirm a belief, or contradict something in the rulebook?
+WORLD_MODEL_PREDICTION:
+{predicted_description}
+
+OBSERVER_REPORT:
+{observed_description}
+
+SIMILARITY_SCORE: {similarity}/5
+
+Compare what the world model predicted with what actually happened. Did the outcome match? Did this reveal something new, confirm a belief, or contradict something in the rulebook?
 
 You may output MULTIPLE operations (one per line). Formats:
 ADD detailed lesson (~20-30 words) | specific evidence (~20-30 words) (confidence 0-1)
@@ -98,103 +109,79 @@ Think step by step, then output ONLY operations (no rationale/prose labels).
 ANSWER:
 <one or more operations, one per line>"""
 
-DIAGNOSIS_PROMPT = """\
-Something unexpected happened while trying to solve the game.
+WORLD_MODEL_PROMPT = """\
+You are predicting what will happen next in a game.
 
-EXPECTED: {expected}
-ACTUAL: {actual}
+Given the current state, the action about to be taken, and your rulebook of \
+learned game mechanics, describe what the game state will look like AFTER \
+the action executes.
 
-RULEBOOK:
-{memory_text}
+Be exhaustive: describe EVERY element visible on the grid — positions, colors, \
+spatial relationships, boundaries. Every element on the grid likely serves a \
+purpose, either in this level or in later levels. Do not omit objects just \
+because their role is unclear yet.
 
-Which level of our understanding was wrong?
-- action: an action did something different than we recorded
-- subgoal: a subgoal had an unexpected outcome or was impossible
-- plan: our overall strategy to win the game is flawed or incomplete
-
-Which specific memory entry (by index) is most likely wrong?
-
-Briefly think step by step, then output exactly one final line:
-ANSWER: level=<action|subgoal|plan> index=<n or none>"""
-
-EXPECTATION_ASSESS_PROMPT = """\
-You are checking whether an observed outcome matched what our current memory predicted.
-
-MODE: {mode}
-SUBGOAL_INDEX: {subgoal_index}
-EXPECTED: {expected}
-ACTUAL: {actual}
-
-RULEBOOK:
-{memory_text}
-
-Decide if ACTUAL matched EXPECTED from the rulebook.
-
-Output exactly one final line:
-ANSWER: verdict=<expected|unexpected> conf=<0.00-1.00> level=<action|subgoal|plan> ref=<index|none>
-"""
-
-SEMANTIC_TRANSITION_PROMPT = """\
-You are an observer describing what changed in a game transition.
-
-You must describe only evidence-grounded changes and plausible mechanics.
-Avoid claiming level completion unless directly observed in AFTER state metadata.
-You may include uncertain hypotheses, but clearly mark uncertainty.
-Use up to {max_sentences} sentences.
-
-BEFORE:
+STATE_BEFORE:
 {state_before}
 
 ACTION:
 {action_taken}
 
-AFTER:
+{memory_text}
+
+Describe the predicted state after the action. Be specific about positions, \
+colors, and spatial relationships. ~3-5 sentences.
+Think step by step, then output exactly one final line:
+ANSWER: <predicted state description>
+"""
+
+OBSERVER_PROMPT = """\
+You are describing a game state transition that just occurred.
+
+Describe what changed and what the game state looks like now. Be exhaustive: \
+describe EVERY element visible on the grid — positions, colors, spatial \
+relationships, boundaries. Every element on the grid likely serves a purpose, \
+either in this level or in later levels. Do not omit objects just because \
+their role is unclear.
+
+STATE_BEFORE:
+{state_before}
+
+STATE_AFTER:
 {state_after}
 
 DIFF:
 {diff_text}
-
-MEMORY (rulebook; may contain wrong assumptions):
-{memory_text}
 
 If images are attached, they are ordered as:
 - image1: BEFORE
 - image2: AFTER
 - image3: VISUAL_DIFF (BEFORE|AFTER|DIFF composite)
 
-Write a thorough semantic transition report grounded in the observed change.
+Describe the observed transition and resulting state. Be specific about what \
+changed and what stayed the same. ~3-5 sentences.
 Think step by step, then output exactly one final line:
-ANSWER: <semantic transition report, <= {max_sentences} sentences>
+ANSWER: <observed state description>
 """
 
-SELF_RATED_SURPRISE_PROMPT = """\
-You are rating how surprising a transition was.
+JUDGE_PROMPT = """\
+You are comparing two descriptions of a game state transition.
 
-Given EXPECTED context (before state, action, memory rulebook) and observed outcome,
-return a surprise score from 0 to 10:
-- 0 = fully expected
-- 10 = extremely unexpected
+PREDICTED (what was expected to happen):
+{predicted_description}
 
-MODE: {mode}
-EXPECTED_CONTEXT:
-BEFORE:
-{state_before}
+OBSERVED (what actually happened):
+{observed_description}
 
-ACTION:
-{action_taken}
+Rate how well the prediction matched the observation on a 1-5 scale:
+  1 = Completely wrong — predicted outcome has no relation to what happened
+  2 = Wrong direction — predicted some change but the wrong kind
+  3 = Partially right — got the general idea but missed key details
+  4 = Mostly right — captured the main effect, minor details off
+  5 = Exact match — predicted outcome matches observation
 
-RULEBOOK:
-{memory_text}
-
-OBSERVED_OUTCOME:
-AFTER:
-{state_after}
-
-DIFF:
-{diff_text}
-
-Think step by step, then output exactly one final line:
-ANSWER: SURPRISE_X10=<0-10>
+Output exactly one final line:
+ANSWER: SIMILARITY=<1-5>
 """
 
 
@@ -256,8 +243,11 @@ class Learner:
         rulebook_status: str = "none",
         missing_action_lessons: str = "none",
         action_history: str = "no actions taken yet",
+        predicted_description: str = "",
+        observed_description: str = "",
+        similarity: int = 0,
     ) -> bool:
-        """Observe a state transition and update memory.
+        """Observe a state transition and update memory (the "scribe" agent).
 
         Args:
             state_before: Compressed state before action.
@@ -270,6 +260,9 @@ class Learner:
             phase: Current high-level phase.
             level: Current abstraction level.
             subgoal_index: Active subgoal index, if any.
+            predicted_description: World model's predicted state (from predict_outcome).
+            observed_description: Observer's description of actual state (from observe_transition).
+            similarity: Judge's similarity score 1-5 (from judge_similarity).
 
         Returns:
             True if memory was changed, False otherwise.
@@ -290,6 +283,9 @@ class Learner:
             diff_text=diff_text,
             memory_text=memory_text,
             action_history=action_history,
+            predicted_description=predicted_description or "none",
+            observed_description=observed_description or "none",
+            similarity=similarity if similarity > 0 else "N/A",
         )
 
         images = [url for url in [image_before_url, image_after_url, image_diff_url] if url]
@@ -321,141 +317,98 @@ class Learner:
 
         return any_changed
 
-    def diagnose(
-        self,
-        expected: str,
-        actual: str,
-        memory: Memory,
-        image_data_url: str | None = None,
-    ) -> Optional[dict]:
-        """Diagnose which abstraction level's assumption broke.
-
-        Called when exploitation fails (high surprise or GAME_OVER).
-
-        Returns:
-            dict with "level" (action/subgoal/plan) and "entry_index" (int or None),
-            or None if diagnosis failed.
-        """
-        memory_text = memory.to_text() if memory else "empty"
-
-        prompt = DIAGNOSIS_PROMPT.format(
-            expected=expected,
-            actual=actual,
-            memory_text=memory_text,
-        )
-
-        raw_output = self._call_llm(
-            prompt,
-            image_data_urls=[image_data_url] if image_data_url else None,
-        )
-        answer_output = self._extract_answer(raw_output)
-        self.last_raw_output = raw_output
-        self.last_answer_output = answer_output
-        return self._parse_diagnosis(answer_output)
-
-    def assess_expectation(
-        self,
-        expected: str,
-        actual: str,
-        memory: Memory,
-        mode: str,
-        subgoal_index: int | None = None,
-        image_data_url: str | None = None,
-    ) -> Optional[dict]:
-        """Assess whether the observed result was expected from memory."""
-        memory_text = memory.to_text() if memory else "empty"
-        prompt = EXPECTATION_ASSESS_PROMPT.format(
-            mode=mode,
-            subgoal_index=str(subgoal_index) if subgoal_index is not None else "none",
-            expected=expected or "no prediction",
-            actual=actual,
-            memory_text=memory_text,
-        )
-        raw_output = self._call_llm(
-            prompt,
-            image_data_urls=[image_data_url] if image_data_url else None,
-        )
-        answer_output = self._extract_answer(raw_output)
-        self.last_raw_output = raw_output
-        self.last_answer_output = answer_output
-        return self._parse_expectation_assessment(answer_output)
-
-    def generate_semantic_transition_report(
+    def predict_outcome(
         self,
         *,
         state_before: str,
         action_taken: str,
-        state_after: str,
-        diff_text: str,
         memory: Memory,
         image_before_url: str | None = None,
-        image_after_url: str | None = None,
-        image_diff_url: str | None = None,
-        max_sentences: int | None = None,
-        temperature: float | None = None,
-        max_tokens: int | None = None,
     ) -> str:
-        """Generate a semantic report of transition effects.
+        """World Model agent: predict what the state will look like after the action.
 
-        The report is free-form but sentence-capped for reward stability.
+        Uses the rulebook (memory) to inform predictions. Returns a semantic
+        description of the predicted next state.
         """
         memory_text = memory.to_text() if memory else "empty"
-        sentence_cap = max(1, max_sentences or self.semantic_report_max_sentences)
-        prompt = SEMANTIC_TRANSITION_PROMPT.format(
-            max_sentences=sentence_cap,
+        prompt = WORLD_MODEL_PROMPT.format(
             state_before=state_before,
             action_taken=action_taken,
-            state_after=state_after,
-            diff_text=diff_text,
             memory_text=memory_text,
         )
-        images = [url for url in [image_before_url, image_after_url, image_diff_url] if url]
+        images = [image_before_url] if image_before_url else None
         raw_output = self._call_llm(
             prompt,
-            max_tokens=max_tokens or self.semantic_observer_max_tokens,
-            temperature=temperature if temperature is not None else self.semantic_observer_temperature,
-            image_data_urls=images or None,
+            max_tokens=self.semantic_observer_max_tokens,
+            temperature=self.semantic_observer_temperature,
+            image_data_urls=images,
         )
         answer_output = self._extract_answer(raw_output)
-        report = self._trim_sentences(answer_output, max_sentences=sentence_cap)
         self.last_raw_output = raw_output
-        self.last_answer_output = report
-        return report
+        self.last_answer_output = answer_output
+        return answer_output
 
-    def self_rate_surprise(
+    def observe_transition(
         self,
         *,
         state_before: str,
-        action_taken: str,
         state_after: str,
         diff_text: str,
-        memory: Memory,
-        mode: str = "action",
         image_before_url: str | None = None,
         image_after_url: str | None = None,
         image_diff_url: str | None = None,
-    ) -> float:
-        """Return model self-rated surprise score in [0, 10]."""
-        memory_text = memory.to_text() if memory else "empty"
-        prompt = SELF_RATED_SURPRISE_PROMPT.format(
-            mode=mode,
+    ) -> str:
+        """Observer agent: describe what actually happened in the transition.
+
+        Produces a ground-truth semantic description of the observed state change.
+        This is the reference side for the judge comparison.
+        """
+        prompt = OBSERVER_PROMPT.format(
             state_before=state_before,
-            action_taken=action_taken,
             state_after=state_after,
             diff_text=diff_text,
-            memory_text=memory_text,
         )
         images = [url for url in [image_before_url, image_after_url, image_diff_url] if url]
         raw_output = self._call_llm(
             prompt,
-            max_tokens=128,
+            max_tokens=self.semantic_observer_max_tokens,
             temperature=self.semantic_observer_temperature,
             image_data_urls=images or None,
         )
         answer_output = self._extract_answer(raw_output)
         self.last_raw_output = raw_output
         self.last_answer_output = answer_output
-        return self._parse_self_rated_surprise(answer_output)
+        return answer_output
+
+    def judge_similarity(
+        self,
+        predicted_description: str,
+        observed_description: str,
+    ) -> int:
+        """Judge agent: score how well the prediction matched observation.
+
+        Returns similarity score 1-5:
+          1 = Completely wrong
+          2 = Wrong direction
+          3 = Partially right
+          4 = Mostly right
+          5 = Exact match
+
+        Surprise can be derived as (6 - similarity) / 5.0 → [0, 1].
+        """
+        prompt = JUDGE_PROMPT.format(
+            predicted_description=predicted_description or "(no prediction)",
+            observed_description=observed_description or "(no observation)",
+        )
+        raw_output = self._call_llm(
+            prompt,
+            max_tokens=128,
+            temperature=0.3,  # low temperature for consistent scoring
+        )
+        answer_output = self._extract_answer(raw_output)
+        self.last_raw_output = raw_output
+        self.last_answer_output = answer_output
+        return self._parse_similarity(answer_output)
 
     def consolidate(self, memory: Memory, current_step: int) -> int:
         """Review and consolidate the rulebook to remove duplicates and improve clarity.
@@ -604,28 +557,23 @@ class Learner:
             return ["NONE"]
         return []
 
-    def _parse_diagnosis(self, raw_output: str) -> Optional[dict]:
-        """Parse diagnosis output into level and entry index."""
-        text = raw_output.lower().strip()
-
-        level = None
-        for candidate in ("action", "subgoal", "plan"):
-            if candidate in text:
-                level = candidate
-                break
-
-        if not level:
-            logger.warning(f"Could not parse diagnosis level from: {raw_output[:80]}")
-            return None
-
-        # Try to find entry index
-        entry_index = None
-
-        match = re.search(r"(?:entry|index)\s*:?\s*(\d+)", text)
+    @staticmethod
+    def _parse_similarity(raw_output: str) -> int:
+        """Parse similarity score 1-5 from judge output."""
+        text = raw_output.strip()
+        match = re.search(
+            r"SIMILARITY\s*[:=]\s*([1-5])",
+            text,
+            flags=re.IGNORECASE,
+        )
         if match:
-            entry_index = int(match.group(1))
-
-        return {"level": level, "entry_index": entry_index}
+            return int(match.group(1))
+        # Fallback: first digit 1-5
+        fallback = re.search(r"\b([1-5])\b", text)
+        if fallback:
+            return int(fallback.group(1))
+        logger.warning(f"Could not parse similarity from: {raw_output[:80]}")
+        return 3  # default to middle
 
     def _extract_answer(self, raw_output: str) -> str:
         """Extract everything after the final ANSWER: marker.
@@ -646,79 +594,6 @@ class Learner:
 
         return text
 
-    def _parse_expectation_assessment(self, raw_output: str) -> Optional[dict]:
-        """Parse expectation-assessment schema from model output.
-
-        Accepts both strict key=value format and common model variations:
-          verdict=unexpected conf=0.85 level=plan ref=none   (prompt format)
-          VERDICT: unexpected conf=0.85 level=plan           (common variation)
-          unexpected conf=0.85 level=plan                    (bare)
-        """
-        text = raw_output.strip()
-
-        # Strip optional VERDICT:/verdict= label prefix
-        text_clean = re.sub(
-            r"^(?:verdict)\s*[:=]\s*", "", text, count=1, flags=re.IGNORECASE
-        )
-
-        # Match verdict value + key=value pairs (ref is optional)
-        match = re.search(
-            r"(expected|unexpected)\s+"
-            r"conf\s*[:=]\s*([01](?:\.\d+)?)\s+"
-            r"level\s*[:=]\s*(action|subgoal|plan)"
-            r"(?:\s+ref\s*[:=]\s*([A-Za-z0-9_-]+|none))?",
-            text_clean,
-            flags=re.IGNORECASE,
-        )
-        if not match:
-            logger.warning(f"Could not parse expectation assessment from: {raw_output[:120]}")
-            return None
-
-        verdict = match.group(1).lower()
-        confidence = max(0.0, min(1.0, float(match.group(2))))
-        level = match.group(3).lower()
-        entry_ref = match.group(4) if match.group(4) else None
-        if entry_ref and entry_ref.lower() == "none":
-            entry_ref = None
-
-        return {
-            "verdict": verdict,
-            "confidence": confidence,
-            "level": level,
-            "entry_ref": entry_ref,
-            "raw": raw_output,
-        }
-
-    @staticmethod
-    def _trim_sentences(text: str, max_sentences: int) -> str:
-        """Trim output to at most max_sentences sentence-like segments."""
-        cleaned = " ".join(text.strip().split())
-        if not cleaned:
-            return ""
-        # Keep punctuation boundaries while handling newlines.
-        parts = re.split(r"(?<=[.!?])\s+", cleaned)
-        if len(parts) <= max_sentences:
-            return cleaned
-        return " ".join(parts[:max_sentences]).strip()
-
-    @staticmethod
-    def _parse_self_rated_surprise(raw_output: str) -> float:
-        """Parse surprise score in [0, 10] from model output."""
-        text = raw_output.strip()
-        match = re.search(
-            r"(?:SURPRISE_X10|SURPRISE|X10)\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)",
-            text,
-            flags=re.IGNORECASE,
-        )
-        if not match:
-            # Fallback: first numeric token.
-            fallback = re.search(r"([0-9]+(?:\.[0-9]+)?)", text)
-            if not fallback:
-                return 0.0
-            value = float(fallback.group(1))
-        else:
-            value = float(match.group(1))
-        return max(0.0, min(10.0, value))
 
     @property
     def memory_is_stable(self) -> bool:

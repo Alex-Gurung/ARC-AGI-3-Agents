@@ -1,0 +1,119 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "LoopAgent Boundary Reward Event",
+  "type": "object",
+  "required": [
+    "episode_id",
+    "attempt_id",
+    "boundary_index",
+    "step",
+    "framework",
+    "group_id",
+    "role",
+    "module",
+    "mode",
+    "boundary_type",
+    "action_trace",
+    "state_before_hash",
+    "state_after_hash",
+    "reward_components",
+    "reward_scalar",
+    "reward_channel_version"
+  ],
+  "properties": {
+    "episode_id": { "type": "string" },
+    "attempt_id": { "type": "string" },
+    "boundary_index": { "type": "integer", "minimum": 0 },
+    "step": { "type": "integer", "minimum": 0 },
+    "policy_version": { "type": "string" },
+    "framework": { "type": "string", "enum": ["openrlhf", "verl", "pipelinerl", "prime_rl"] },
+    "group_id": { "type": "string" },
+
+    "role": { "type": "string", "enum": ["DECIDER", "LEARNER", "curiosity", "learner", "solver"] },
+    "module": { "type": "string", "enum": ["curiosity", "learner", "solver"] },
+    "mode": { "type": "string", "enum": ["LEARN_ACTION", "LEARN_SUBGOAL", "LEARN_PLAN", "SOLVE"] },
+    "phase": { "type": "string" },
+    "boundary_type": { "type": "string", "enum": ["action", "subgoal", "plan"] },
+    "boundary_reason": { "type": "string" },
+    "subgoal_index": { "type": ["integer", "string", "null"] },
+
+    "active_plan": { "type": "string" },
+    "active_subgoal": { "type": "string" },
+    "action_trace": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "action_trace_len": { "type": "integer", "minimum": 0 },
+    "expected": { "type": "string" },
+
+    "state_before_hash": { "type": "string" },
+    "state_after_hash": { "type": "string" },
+    "state_visits_before": { "type": "integer", "minimum": 0 },
+    "state_visits_after": { "type": "integer", "minimum": 0 },
+    "repeat_state_streak_before": { "type": "integer", "minimum": 0 },
+    "repeat_state_streak_after": { "type": "integer", "minimum": 0 },
+    "changed_cells": { "type": "integer", "minimum": 0 },
+    "level_delta": { "type": "integer" },
+
+    "terminal_state": { "type": "string" },
+    "is_win": { "type": "boolean" },
+    "is_game_over": { "type": "boolean" },
+    "is_soft_reset": { "type": "boolean" },
+    "parse_warning": { "type": "string" },
+
+    "memory_before_count": { "type": "integer", "minimum": 0 },
+    "memory_after_count": { "type": "integer", "minimum": 0 },
+    "missing_action_lessons_before": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "missing_action_lessons_after": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+
+    "semantic_report": { "type": "string" },
+    "surprise": {
+      "type": "object",
+      "properties": {
+        "source": { "type": "string" },
+        "debiased_nll": { "type": "number" },
+        "self_rated_x10": { "type": "number" },
+        "reward_value": { "type": "number" },
+        "mean_nll_full": { "type": "number" },
+        "mean_nll_stripped": { "type": "number" }
+      },
+      "additionalProperties": true
+    },
+
+    "reward_components": {
+      "type": "object",
+      "properties": {
+        "surprise": { "type": "number" },
+        "novelty": { "type": "number" },
+        "transition_magnitude": { "type": "number" },
+        "boundary_progress": { "type": "number" },
+        "unknown_action_bonus": { "type": "number" },
+        "loop_break_bonus": { "type": "number" },
+        "repeat_penalty": { "type": "number" },
+        "mismatch_reduction": { "type": "number" },
+        "parse_bonus": { "type": "number" },
+        "dedup_bonus": { "type": "number" },
+        "contradiction_cleanup_bonus": { "type": "number" },
+        "missing_action_reduction_bonus": { "type": "number" },
+        "parse_warning_penalty": { "type": "number" },
+        "level_delta_reward": { "type": "number" },
+        "win_bonus": { "type": "number" },
+        "game_over_penalty": { "type": "number" },
+        "step_penalty": { "type": "number" },
+        "solver_surprise_bonus": { "type": "number" }
+      },
+      "additionalProperties": true
+    },
+
+    "reward_scalar": { "type": "number" },
+    "reward_channel_version": { "type": "string" },
+    "diagnostics": { "type": "object", "additionalProperties": true }
+  },
+  "additionalProperties": true
+}

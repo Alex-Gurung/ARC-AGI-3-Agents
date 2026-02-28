@@ -68,6 +68,9 @@ Verdict now:
 2. Keep veRL path for explicit grouped branching + semantic surprise experiments.
 3. Add PRIME-RL as next integration target (higher ROI than PipelineRL for ARC loop semantics).
 4. Defer PipelineRL unless/ until multi-GPU throughput becomes the bottleneck.
+5. Reuse the shared boundary reward event contract:
+   - `training/BOUNDARY_REWARD_SCHEMA.md`
+   - `training/boundary_event.schema.json`
 
 ## TODO (Follow-up)
 

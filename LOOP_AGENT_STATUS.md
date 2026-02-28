@@ -260,6 +260,10 @@ The `LoopAgent` is now an explore-learn-exploit harness with:
   - includes replica-prefix replay hooks for counterfactual candidate scoring
   - includes explicit `commit_selected_candidate(...)` helper so only the selected
     branch mutates canonical trajectory state; non-selected candidates are log-only
+- Shared boundary reward schema + scalarization:
+  - `training/BOUNDARY_REWARD_SCHEMA.md`
+  - `training/boundary_event.schema.json`
+  - `training/reward_channels.py`
 - OpenRLHF scaffold for single-game RL:
   - `training/openrlhf/agent_func_loopagent_ls20.py`
   - `training/openrlhf/agent_func_ls20.py`

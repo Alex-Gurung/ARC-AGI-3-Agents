@@ -40,6 +40,9 @@ See: `training/verl/README.md`
 - Grouped candidate branching is training-only.
 - `GRID/DIFF` is treated as ground truth.
 - `OBJECTS/RELATIONS` is heuristic/noisy.
+- Shared boundary reward spec:
+  - `training/BOUNDARY_REWARD_SCHEMA.md`
+  - `training/boundary_event.schema.json`
 
 ## Backend Evaluation Notes
 

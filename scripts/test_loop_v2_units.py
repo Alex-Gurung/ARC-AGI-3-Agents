@@ -15,7 +15,6 @@ from arcengine import FrameData, GameAction, GameState
 from agents.templates.loop_agent import DecisionMode, LoopAgent, Phase
 from agents.templates.loop_agent.curiosity import Curiosity
 from agents.templates.loop_agent.learner import Learner
-from agents.templates.loop_agent.memory import Memory
 from agents.templates.loop_agent.surprise import LevelController
 from training.group_sampler import GroupSampler
 from training.rollout_runner import ModuleCandidateConfig, TrainingRolloutRunner
@@ -131,19 +130,15 @@ def test_level_regression() -> None:
     print("  PASS\n")
 
 
-def test_expectation_parser() -> None:
+def test_similarity_parser() -> None:
     print("=" * 60)
-    print("TEST: Learner expectation parser")
+    print("TEST: Learner similarity parser")
     print("=" * 60)
-    learner = Learner(client=None, model="dummy")  # type: ignore[arg-type]
-    parsed = learner._parse_expectation_assessment(
-        "verdict=unexpected conf=0.82 level=subgoal ref=12"
-    )
-    assert parsed is not None
-    assert parsed["verdict"] == "unexpected"
-    assert abs(parsed["confidence"] - 0.82) < 1e-6
-    assert parsed["level"] == "subgoal"
-    assert parsed["entry_ref"] == "12"
+    assert Learner._parse_similarity("SIMILARITY=4") == 4
+    assert Learner._parse_similarity("ANSWER: SIMILARITY=1") == 1
+    assert Learner._parse_similarity("The similarity is 3 out of 5") == 3
+    assert Learner._parse_similarity("no match here") == 3  # default
+    assert Learner._parse_similarity("SIMILARITY = 5") == 5
     print("  PASS\n")
 
 
@@ -165,61 +160,26 @@ ADD [ACTION] ACTION2 moves wave right by 1 cell | observed in 3 transitions (0.7
     print("  PASS\n")
 
 
-def test_diagnosis_directed_level() -> None:
+def test_surprise_from_similarity() -> None:
     print("=" * 60)
-    print("TEST: Diagnosis-directed level routing")
+    print("TEST: Surprise score from judge similarity")
     print("=" * 60)
-
-    class LearnerStub:
-        def __init__(self, outputs: list[dict[str, Any]]) -> None:
-            self.outputs = outputs
-            self.idx = 0
-
-        def assess_expectation(self, **_: Any) -> dict[str, Any]:
-            out = self.outputs[min(self.idx, len(self.outputs) - 1)]
-            self.idx += 1
-            return out
-
-    harness = SimpleNamespace(
-        learner=LearnerStub(
-            [
-                {"verdict": "unexpected", "confidence": 0.9, "level": "subgoal"},
-                {"verdict": "expected", "confidence": 0.95, "level": "subgoal"},
-            ]
-        ),
-        memory=Memory(),
-        MISMATCH_CONF_THRESHOLD=0.7,
-        _last_boundary_diagnosis_level="none",
-    )
-
-    routed = LoopAgent._run_mode_diagnosis(
-        harness,  # type: ignore[arg-type]
-        mode="subgoal",
-        expected="exp",
-        actual="obs",
-        subgoal_index=0,
-    )
-    assert routed == "subgoal"
-
-    routed = LoopAgent._run_mode_diagnosis(
-        harness,  # type: ignore[arg-type]
-        mode="subgoal",
-        expected="exp",
-        actual="obs",
-        subgoal_index=0,
-    )
-    assert routed is None
-    assert harness._last_boundary_diagnosis_level == "none"
+    # similarity=5 (exact match) => surprise=0.2
+    assert abs((6 - 5) / 5.0 - 0.2) < 1e-6
+    # similarity=1 (completely wrong) => surprise=1.0
+    assert abs((6 - 1) / 5.0 - 1.0) < 1e-6
+    # similarity=3 (partially right) => surprise=0.6
+    assert abs((6 - 3) / 5.0 - 0.6) < 1e-6
     print("  PASS\n")
 
 
-def test_plan_end_only_diagnosis() -> None:
+def test_pipeline_fires_at_subgoal_boundary() -> None:
     print("=" * 60)
-    print("TEST: Plan diagnosis only at plan-attempt end")
+    print("TEST: WM+Observer+Judge pipeline fires at subgoal boundary")
     print("=" * 60)
     agent = _make_agent()
     agent.phase = Phase.EXPLOIT
-    agent.current_mode = DecisionMode.LEARN_PLAN
+    agent.current_mode = DecisionMode.LEARN_SUBGOAL
     agent._subgoal_sequence_start_state = "s0"
     agent._subgoal_sequence_start_grid = [[0]]
     agent._subgoal_sequence_taken_actions = ["ACTION1"]
@@ -227,58 +187,49 @@ def test_plan_end_only_diagnosis() -> None:
     agent._subgoal_sequence_expected = "expect progress"
     agent._last_prediction = "expect progress"
     agent._subgoal_sequence_is_explore = False
-    agent._subgoal_sequence_level = "plan"
+    agent._subgoal_sequence_level = "subgoal"
     agent._active_subgoal = "reach target"
     agent._active_subgoal_index = 0
-    agent._plan_attempt_active = True
+    agent._plan_attempt_active = False
 
-    agent.learner.update = lambda **_: False  # type: ignore[method-assign]
-    agent.learner.self_rate_surprise = lambda **_: 0.0  # type: ignore[method-assign]
+    agent.LEARNER_NUM_SAMPLES = 1  # avoid best-of-N calling scribe multiple times
+
+    pipeline_calls: list[str] = []
+    agent.learner.predict_outcome = lambda **_: (pipeline_calls.append("predict") or "") or "predicted state"  # type: ignore[method-assign]
+    agent.learner.observe_transition = lambda **_: (pipeline_calls.append("observe") or "") or "observed state"  # type: ignore[method-assign]
+    agent.learner.judge_similarity = lambda *_, **__: (pipeline_calls.append("judge") or 0) or 3  # type: ignore[method-assign]
+    agent.learner.update = lambda **_: (pipeline_calls.append("scribe") or False)  # type: ignore[method-assign]
     agent._record_surprise = lambda *_: None  # type: ignore[method-assign]
     agent._route_mode_after_boundary = lambda **_: None  # type: ignore[method-assign]
     agent._reset_subgoal_sequence_state = lambda **_: None  # type: ignore[method-assign]
+    agent._maybe_consolidate_memory = lambda: None  # type: ignore[method-assign]
 
-    calls: list[str] = []
-    agent._run_mode_diagnosis = lambda **kwargs: calls.append(str(kwargs.get("mode")))  # type: ignore[method-assign]
-
-    # Non-terminal + exhausted + advanced => not plan-end yet.
-    agent._advance_subgoal = lambda: True  # type: ignore[method-assign]
     agent._finalize_subgoal_sequence(
         state_after="s1",
         grid_after=[[0]],
         frame_after=FrameData(state=GameState.NOT_FINISHED),
         reason="exhausted",
     )
-    assert calls == []
-
-    # Non-terminal + exhausted + not advanced => plan-attempt end.
-    agent._advance_subgoal = lambda: False  # type: ignore[method-assign]
-    agent._finalize_subgoal_sequence(
-        state_after="s2",
-        grid_after=[[0]],
-        frame_after=FrameData(state=GameState.NOT_FINISHED),
-        reason="exhausted",
-    )
-    assert calls == ["plan"]
+    assert pipeline_calls == ["predict", "observe", "judge", "scribe"], pipeline_calls
     print("  PASS\n")
 
 
-def test_game_over_diagnostic_override() -> None:
+def test_surprise_summary_text() -> None:
     print("=" * 60)
-    print("TEST: GAME_OVER diagnostic level jump")
+    print("TEST: Per-level surprise summary text")
     print("=" * 60)
     agent = _make_agent()
-    agent.phase = Phase.EXPLOIT
-    agent.current_mode = DecisionMode.SOLVE
+    # Record some surprise values
+    agent._record_surprise("action", 0.4)
+    agent._record_surprise("action", 0.6)
+    agent._record_surprise("subgoal", 0.8)
 
-    agent.learner.diagnose = lambda **_: {"level": "subgoal", "entry_index": None}  # type: ignore[method-assign]
-    agent._route_mode_after_boundary(
-        state_text="state_after",
-        frame_after=FrameData(state=GameState.GAME_OVER),
-        diagnosis_level=None,
-    )
-
-    assert agent.current_mode == DecisionMode.LEARN_SUBGOAL
+    summary = agent._surprise_summary_text()
+    assert "action:" in summary
+    assert "avg=0.50" in summary
+    assert "subgoal:" in summary
+    assert "avg=0.80" in summary
+    assert "plan: no data" in summary
     print("  PASS\n")
 
 
@@ -343,10 +294,10 @@ if __name__ == "__main__":
     test_no_change_interrupt_and_terminal_precedence()
     test_soft_reset_step_skip_gate()
     test_level_regression()
-    test_expectation_parser()
+    test_similarity_parser()
     test_learner_operation_filtering()
-    test_diagnosis_directed_level()
-    test_plan_end_only_diagnosis()
-    test_game_over_diagnostic_override()
+    test_surprise_from_similarity()
+    test_pipeline_fires_at_subgoal_boundary()
+    test_surprise_summary_text()
     test_group_sampler_and_training_selection()
     print("All Loop v2 unit tests passed!")

@@ -27,6 +27,7 @@ class CandidateDecision:
     reward: float
     advantage: float
     probability: float
+    reward_components: dict[str, float] = field(default_factory=dict)
     surprise: SurpriseMetrics | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -48,6 +49,7 @@ class DecisionRecord:
     memory_after: str
     semantic_report: str
     selected_index: int
+    reward_channel_version: str = "v2"
     candidates: list[CandidateDecision] = field(default_factory=list)
     diagnostics: dict[str, Any] = field(default_factory=dict)
 

@@ -106,7 +106,6 @@ class StepData:
     plan: str = ""
     queued: int = 0
     in_subgoal_seq: bool = False
-    diagnosis: str = ""
     state_visits: int = 0
     repeat_streak: int = 0
 
@@ -118,7 +117,9 @@ class Captures:
     solver: dict[str, Any] = field(default_factory=dict)
     learner: dict[str, Any] = field(default_factory=dict)
     learner_update: dict[str, Any] = field(default_factory=dict)
-    learner_diag: dict[str, Any] = field(default_factory=dict)
+    world_model: dict[str, Any] = field(default_factory=dict)
+    observer: dict[str, Any] = field(default_factory=dict)
+    judge: dict[str, Any] = field(default_factory=dict)
     router: dict[str, Any] = field(default_factory=dict)
     last_surprise: float = 0.0
     surprise_detail: dict[str, Any] = field(default_factory=dict)
@@ -229,11 +230,8 @@ def render_status(agent: Any, step_data: StepData) -> Panel:
         Text.assemble(("Learner: ", "dim"), (learner_text, learner_style)),
     )
 
-    # Third row: levels, state, diagnosis, sequence status
+    # Third row: levels, state, sequence status
     win_levels = getattr(agent.frames[-1], "win_levels", "?") if agent.frames else "?"
-    diagnosis = step_data.diagnosis
-    diag_style = "bold yellow" if diagnosis and diagnosis != "none" else "dim"
-    diag_text = diagnosis if diagnosis and diagnosis != "none" else "-"
 
     t.add_row(
         Text.assemble(
@@ -243,14 +241,12 @@ def render_status(agent: Any, step_data: StepData) -> Panel:
             (step_data.game_state, ""),
         ),
         Text.assemble(
-            ("Diagnosis: ", "dim"),
-            (diag_text, diag_style),
-            (f"  Queued: {step_data.queued}", "dim"),
-        ),
-        Text.assemble(
-            ("Seq: ", "dim"),
+            ("Queued: ", "dim"),
+            (str(step_data.queued), "bold" if step_data.queued else "dim"),
+            ("  Seq: ", "dim"),
             ("active" if step_data.in_subgoal_seq else "-", "cyan" if step_data.in_subgoal_seq else "dim"),
         ),
+        Text(""),
     )
     t.add_row(
         Text.assemble(
@@ -285,8 +281,10 @@ def render_llm_io(captures: Captures, agent: Any = None) -> Panel:
     components = [
         ("curiosity", "Curiosity", "cyan"),
         ("solver", "Solver", "magenta"),
-        ("learner_update", "LearnerUpdate", "yellow"),
-        ("learner_diag", "LearnerDiag", "bright_yellow"),
+        ("world_model", "WorldModel", "bright_green"),
+        ("observer", "Observer", "bright_blue"),
+        ("judge", "Judge", "bright_yellow"),
+        ("learner_update", "Scribe", "yellow"),
         ("router", "Router", "bright_magenta"),
         ("learner", "Learner", "yellow"),
     ]
@@ -345,10 +343,10 @@ def render_llm_io(captures: Captures, agent: Any = None) -> Panel:
         header.append("\u2500\u2500 Surprise ", style="bold green")
 
         score = sd.get("score", 0.0)
-        score_x10 = sd.get("score_x10", score * 10)
+        similarity = sd.get("similarity", 0)
 
         score_style = "bold red" if score > 0.5 else "bold yellow" if score > 0 else "dim green"
-        header.append(f"(self-rated={score_x10:.0f}/10, normalized={score:.3f})", style="dim")
+        header.append(f"(similarity={similarity}/5, surprise={score:.3f})", style="dim")
         sections.append(header)
 
         detail = Text()
@@ -443,8 +441,12 @@ def instrument_agent(agent: Any, captures: Captures) -> None:
                 elif comp_name == "learner":
                     if captures._learner_context == "learner_update":
                         target = "learner_update"
-                    elif captures._learner_context == "learner_diag":
-                        target = "learner_diag"
+                    elif captures._learner_context == "world_model":
+                        target = "world_model"
+                    elif captures._learner_context == "observer":
+                        target = "observer"
+                    elif captures._learner_context == "judge":
+                        target = "judge"
                 cap = {"prompt": prompt, "output": None}
                 setattr(captures, target, cap)
                 result = orig(prompt, *args, **kwargs)
@@ -468,7 +470,7 @@ def instrument_agent(agent: Any, captures: Captures) -> None:
 
         agent.curiosity.propose_mode = mode_wrapper
 
-    # Wrap learner entrypoints so update and diagnosis appear in separate panels.
+    # Wrap learner entrypoints so scribe (update) appears in its own panel.
     if hasattr(agent.learner, "update"):
         orig_update = agent.learner.update
 
@@ -481,49 +483,63 @@ def instrument_agent(agent: Any, captures: Captures) -> None:
 
         agent.learner.update = learner_update_wrapper
 
-    if hasattr(agent.learner, "assess_expectation"):
-        orig_assess = agent.learner.assess_expectation
+    # Wrap World Model + Observer + Judge pipeline methods
+    if hasattr(agent.learner, "predict_outcome"):
+        orig_predict = agent.learner.predict_outcome
 
-        def learner_assess_wrapper(*args: Any, **kwargs: Any) -> Any:
-            captures._learner_context = "learner_diag"
+        def predict_wrapper(*args: Any, **kwargs: Any) -> str:
+            captures._learner_context = "world_model"
             try:
-                return orig_assess(*args, **kwargs)
+                result = orig_predict(*args, **kwargs)
             finally:
                 captures._learner_context = None
-
-        agent.learner.assess_expectation = learner_assess_wrapper
-
-    if hasattr(agent.learner, "diagnose"):
-        orig_diagnose = agent.learner.diagnose
-
-        def learner_diagnose_wrapper(*args: Any, **kwargs: Any) -> Any:
-            captures._learner_context = "learner_diag"
-            try:
-                return orig_diagnose(*args, **kwargs)
-            finally:
-                captures._learner_context = None
-
-        agent.learner.diagnose = learner_diagnose_wrapper
-
-    # Capture self-rated surprise scores
-    if hasattr(agent.learner, "self_rate_surprise"):
-        orig_rate = agent.learner.self_rate_surprise
-
-        def surprise_wrapper(*args: Any, **kwargs: Any) -> float:
-            captures._learner_context = "learner"
-            try:
-                score_x10 = orig_rate(*args, **kwargs)
-            finally:
-                captures._learner_context = None
-            score = score_x10 / 10.0
-            captures.last_surprise = score
-            captures.surprise_detail = {
-                "score": score,
-                "score_x10": score_x10,
+            captures.world_model = {
+                "prompt": "(world model prediction)",
+                "output": result,
             }
-            return score_x10  # return original scale
+            return result
 
-        agent.learner.self_rate_surprise = surprise_wrapper
+        agent.learner.predict_outcome = predict_wrapper
+
+    if hasattr(agent.learner, "observe_transition"):
+        orig_observe = agent.learner.observe_transition
+
+        def observe_wrapper(*args: Any, **kwargs: Any) -> str:
+            captures._learner_context = "observer"
+            try:
+                result = orig_observe(*args, **kwargs)
+            finally:
+                captures._learner_context = None
+            captures.observer = {
+                "prompt": "(observer description)",
+                "output": result,
+            }
+            return result
+
+        agent.learner.observe_transition = observe_wrapper
+
+    if hasattr(agent.learner, "judge_similarity"):
+        orig_judge = agent.learner.judge_similarity
+
+        def judge_wrapper(*args: Any, **kwargs: Any) -> int:
+            captures._learner_context = "judge"
+            try:
+                similarity = orig_judge(*args, **kwargs)
+            finally:
+                captures._learner_context = None
+            surprise = (6 - similarity) / 5.0
+            captures.judge = {
+                "prompt": "(judge comparison)",
+                "output": f"SIMILARITY={similarity}",
+            }
+            captures.last_surprise = surprise
+            captures.surprise_detail = {
+                "score": surprise,
+                "similarity": similarity,
+            }
+            return similarity
+
+        agent.learner.judge_similarity = judge_wrapper
 
 
 # ---------------------------------------------------------------------------
@@ -627,7 +643,6 @@ def run(
                 plan=agent._active_plan_text or "",
                 queued=len(agent._pending_subgoal_actions),
                 in_subgoal_seq=agent._subgoal_sequence_active,
-                diagnosis=getattr(agent, "_last_boundary_diagnosis_level", "none"),
                 state_visits=getattr(agent, "_state_visit_counts", {}).get(
                     getattr(agent, "_last_state_signature", "") or "",
                     0,

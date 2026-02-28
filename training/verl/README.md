@@ -4,6 +4,10 @@ This directory contains the parallel veRL-oriented training path for LoopAgent.
 It keeps the OpenRLHF baseline untouched while adding grouped candidate rollouts,
 semantic surprise metrics, and memory curriculum controls.
 
+Shared scalarization helper:
+
+- `training/reward_channels.py`
+
 ## Implementation Status
 
 Current implementation is a grouped rollout collector and trajectory logger:
@@ -130,6 +134,16 @@ Reward source is configurable:
 - Online inference remains single-trajectory.
 - Grouped branching is training-only and commits only the selected candidate.
 - Non-selected branches are logged for diagnostics and offline analysis.
+
+## Boundary Reward Schema
+
+Use the shared boundary event + scalarization spec:
+
+- `training/BOUNDARY_REWARD_SCHEMA.md`
+- `training/boundary_event.schema.json`
+
+The grouped collector should emit boundary rows compatible with this schema,
+including full `reward_components` vectors and role-gated `reward_scalar`.
 
 ## Scope Gaps (Next)
 

@@ -11,6 +11,7 @@ It is maintained alongside the veRL grouped-rollout path in `training/verl/`.
 - `run_grpo_ls20_1gpu.sh`: single-GPU launch script with hybrid colocate settings.
 - `online_grpo_ls20.py`: iterative on-policy runner wrapper for multi-iteration jobs.
 - `run_online_grpo_ls20_1gpu.sh`: shell entrypoint for iterative OpenRLHF runs.
+- `training/reward_channels.py`: shared role-gated scalarization from reward vectors.
 
 ## What This Trains
 
@@ -102,6 +103,20 @@ observations are role-conditioned:
 
 This is not the same as nested per-boundary branching (`Kc/Kl/Ks`) in the veRL path.
 If you need explicit nested branch evaluation and canonical commit logic, use `training/verl/`.
+
+## Boundary Reward Schema
+
+Use the shared boundary event + scalarization spec:
+
+- `training/BOUNDARY_REWARD_SCHEMA.md`
+- `training/boundary_event.schema.json`
+
+In this OpenRLHF path:
+
+- `DECIDER` boundaries map to `module=curiosity` in learn modes and `module=solver` in solve mode.
+- `LEARNER` boundaries map to `module=learner`.
+- Grouped normalization is still handled by OpenRLHF (`group_norm`), while this schema
+  standardizes what gets logged/scored per boundary.
 
 ## Memory Curriculum in OpenRLHF Path
 

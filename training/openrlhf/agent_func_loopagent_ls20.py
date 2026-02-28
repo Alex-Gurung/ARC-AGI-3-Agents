@@ -33,7 +33,12 @@ from agents.templates.loop_agent.memory import (
 )
 from agents.templates.loop_agent.state_encoder import StateEncoder
 from agents.templates.loop_agent.surprise import HeuristicSurprise
-from training.verl.rewards import curiosity_reward, learner_reward, solver_reward
+from training.reward_channels import (
+    RewardComponents,
+    scalarize_curiosity,
+    scalarize_learner,
+    scalarize_solver,
+)
 
 OPENRLHF_IMPORT_ERROR: ImportError | None = None
 try:
@@ -389,23 +394,25 @@ class LS20LoopAgentInstance(AgentInstanceBase):
         )
         novelty_bonus = 1.0 if self._is_state_unseen(self._frame) else 0.0
 
+        module = "solver" if self._mode == "SOLVE" else "curiosity"
         if self._mode == "SOLVE":
-            reward = solver_reward(
-                level_delta=level_delta,
-                is_win=self._frame.state == GameState.WIN,
-                is_game_over=self._frame.state == GameState.GAME_OVER,
-                steps_used=max(1, len(action_trace)),
-            ) + 0.5 * surprise
-        else:
-            reward = curiosity_reward(
-                surprise_reward=surprise,
-                boundary_type=boundary_type,
-                novelty_bonus=novelty_bonus,
-                transition_magnitude_bonus=float(changed_cells),
-                boundary_progress_bonus=float(level_delta),
+            reward_components = RewardComponents(
+                level_delta_reward=float(level_delta),
+                win_bonus=1.0 if self._frame.state == GameState.WIN else 0.0,
+                game_over_penalty=1.0 if self._frame.state == GameState.GAME_OVER else 0.0,
+                step_penalty=float(max(1, len(action_trace))),
+                solver_surprise_bonus=float(surprise),
             )
-        if parse_warning != "none":
-            reward -= 0.25
+            reward = scalarize_solver(reward_components)
+        else:
+            reward_components = RewardComponents(
+                surprise=float(surprise),
+                novelty=float(novelty_bonus),
+                transition_magnitude=float(changed_cells),
+                boundary_progress=float(level_delta),
+            )
+            reward_components.parse_warning_penalty = 1.0 if parse_warning != "none" else 0.0
+            reward = scalarize_curiosity(reward_components, boundary_type=boundary_type)
 
         self._pending_boundary = PendingBoundary(
             mode=self._mode,
@@ -429,6 +436,7 @@ class LS20LoopAgentInstance(AgentInstanceBase):
         observation = self._build_learner_observation(self._pending_boundary)
         info = {
             "role": "DECIDER",
+            "module": module,
             "mode": self._mode,
             "boundary_type": boundary_type,
             "action_trace": action_trace,
@@ -437,6 +445,13 @@ class LS20LoopAgentInstance(AgentInstanceBase):
             "level_delta": level_delta,
             "game_state": self._frame.state.name,
             "actions_used": self._episode_actions_used,
+            "reward_components": reward_components.to_dict(),
+            "reward_scalar": float(reward),
+            "reward_channel_version": "v2",
+            "group_id": (
+                f"{self._card_id or 'episode'}::{self._episode_actions_used}::{module}::"
+                f"{self._mode}::{boundary_type}"
+            ),
         }
         # Always allow learner update step after boundary.
         return observation, float(reward), False, info
@@ -482,16 +497,15 @@ class LS20LoopAgentInstance(AgentInstanceBase):
 
         mismatch_before = self._expected_mismatch(pending.expected, pending.state_after)
         mismatch_after = max(0.0, mismatch_before - (0.2 if changed else 0.0))
-        reward = learner_reward(
-            debiased_before=mismatch_before,
-            debiased_after=mismatch_after,
-            parse_ok=parse_ok,
-            non_duplicate=non_duplicate,
-            contradiction_cleanup=contradiction_cleanup,
+        reward_components = RewardComponents(
+            mismatch_reduction=float(mismatch_before - mismatch_after),
+            parse_bonus=1.0 if parse_ok else 0.0,
+            dedup_bonus=1.0 if non_duplicate else 0.0,
+            contradiction_cleanup_bonus=1.0 if contradiction_cleanup else 0.0,
+            missing_action_reduction_bonus=float(len(before_missing) - len(after_missing)),
+            parse_warning_penalty=1.0 if pending.parse_warning != "none" else 0.0,
         )
-        reward += 0.25 * float(len(before_missing) - len(after_missing))
-        if pending.parse_warning != "none":
-            reward -= 0.1
+        reward = scalarize_learner(reward_components)
 
         if next_mode:
             self._mode = next_mode
@@ -510,11 +524,19 @@ class LS20LoopAgentInstance(AgentInstanceBase):
 
         info = {
             "role": "LEARNER",
+            "module": "learner",
             "mode": self._mode,
             "memory_changed": changed,
             "memory_size": len(self._memory.entries),
             "parse_ok": parse_ok,
             "next_mode": next_mode or "unchanged",
+            "reward_components": reward_components.to_dict(),
+            "reward_scalar": float(reward),
+            "reward_channel_version": "v2",
+            "group_id": (
+                f"{self._card_id or 'episode'}::{self._episode_actions_used}::learner::"
+                f"{pending.mode}::{pending.boundary_type}"
+            ),
         }
         return observation, float(reward), done, info
 

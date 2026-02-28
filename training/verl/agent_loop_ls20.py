@@ -23,13 +23,18 @@ from agents.templates.loop_agent import DecisionMode, LoopAgent
 from agents.templates.loop_agent.learner import Learner
 from agents.templates.loop_agent.memory import Memory
 from agents.templates.loop_agent.surprise import SemanticDebiasedNLLSurprise
+from training.reward_channels import (
+    RewardComponents,
+    scalarize_curiosity,
+    scalarize_learner,
+    scalarize_solver,
+)
 from training.verl.grouped_branching import (
     CandidateSample,
     GroupedBranchingConfig,
     GroupedBranchingEngine,
 )
 from training.verl.memory_curriculum import MemoryCurriculum
-from training.verl.rewards import curiosity_reward, learner_reward, solver_reward
 from training.verl.trajectory_schema import (
     CandidateDecision,
     DecisionRecord,
@@ -288,7 +293,7 @@ class LS20GroupedRunner:
                 boundary_level_hint=boundary_level_hint,
             )
 
-        reward = self._module_reward(
+        reward, top_components = self._module_reward(
             module=module,
             boundary_type=str(selected.metadata.get("boundary_type", "action")),
             surprise_signal=float(selected.metadata.get("surprise_signal", 0.0)),
@@ -316,6 +321,8 @@ class LS20GroupedRunner:
                 "memory_before_count": int(selected.metadata.get("memory_before_count", 0)),
                 "memory_after_count": int(selected.metadata.get("memory_after_count", 0)),
                 "steps_used": int(selected.metadata.get("steps_used", 1)),
+                "reward_components": top_components.to_dict(),
+                "reward_channel_version": "v2",
             },
         )
         surprise_metrics = SurpriseMetrics(
@@ -449,27 +456,26 @@ class LS20GroupedRunner:
         )
 
         learner: Learner = agent.learner
-        semantic_report = learner.generate_semantic_transition_report(
+        # World Model + Observer + Judge pipeline (replaces old semantic_report + self_rate_surprise)
+        predicted = learner.predict_outcome(
             state_before=state_before_boundary,
             action_taken=boundary_action_name,
+            memory=agent.memory,
+            image_before_url=image_before,
+        )
+        observed = learner.observe_transition(
+            state_before=state_before_boundary,
             state_after=state_after,
             diff_text=diff_text,
-            memory=agent.memory,
             image_before_url=image_before,
             image_after_url=image_after,
             image_diff_url=image_diff,
         )
-        self_rated = learner.self_rate_surprise(
-            state_before=state_before_boundary,
-            action_taken=boundary_action_name,
-            state_after=state_after,
-            diff_text=diff_text,
-            memory=agent.memory,
-            mode=mode_hint,
-            image_before_url=image_before,
-            image_after_url=image_after,
-            image_diff_url=image_diff,
-        )
+        similarity = learner.judge_similarity(predicted, observed)
+        # Map to legacy interfaces: semantic_report ≈ observer description,
+        # self_rated ≈ surprise on 0-10 scale
+        semantic_report = observed
+        self_rated = int((6 - similarity) * 2)  # 0-10 scale for compat
         surprise_engine = SemanticDebiasedNLLSurprise(
             client=agent.client,
             model=self.model,
@@ -497,13 +503,14 @@ class LS20GroupedRunner:
         )
         parse_ok = bool((agent.learner.last_answer_output or "").strip())
         contradiction_cleanup = "REMOVE" in (agent.learner.last_answer_output or "").upper()
-        learner_signal = learner_reward(
-            debiased_before=bundle_before.debiased_nll,
-            debiased_after=bundle_after.debiased_nll,
-            parse_ok=parse_ok,
-            non_duplicate=memory_after_count <= memory_before_count + 1,
-            contradiction_cleanup=contradiction_cleanup,
+        learner_components = RewardComponents(
+            mismatch_reduction=float(bundle_before.debiased_nll - bundle_after.debiased_nll),
+            parse_bonus=1.0 if parse_ok else 0.0,
+            dedup_bonus=1.0 if memory_after_count <= memory_before_count + 1 else 0.0,
+            contradiction_cleanup_bonus=1.0 if contradiction_cleanup else 0.0,
+            parse_warning_penalty=0.0,
         )
+        learner_signal = scalarize_learner(learner_components)
         if self.surprise_reward_source == "self_rated":
             surprise_signal = bundle_after.self_rated_x10 / 10.0
         elif self.surprise_reward_source == "hybrid":
@@ -537,6 +544,8 @@ class LS20GroupedRunner:
             "memory_after_count": memory_after_count,
             "steps_used": steps_used,
             "action_events": [asdict(event) for event in action_events],
+            "reward_components": learner_components.to_dict(),
+            "reward_channel_version": "v2",
         }
         return CandidateSample(
             candidate_id=candidate_id,
@@ -555,21 +564,23 @@ class LS20GroupedRunner:
         level_delta: int,
         frame_state: str,
         steps_used: int,
-    ) -> float:
+    ) -> tuple[float, RewardComponents]:
         if module == "solver":
-            return solver_reward(
-                level_delta=level_delta,
-                is_win=frame_state == GameState.WIN.name,
-                is_game_over=frame_state == GameState.GAME_OVER.name,
-                steps_used=steps_used,
-            ) + 0.5 * surprise_signal
-        return curiosity_reward(
-            surprise_reward=surprise_signal,
-            boundary_type=boundary_type,
-            novelty_bonus=1.0 if changed_cells > 0 else 0.0,
-            transition_magnitude_bonus=float(changed_cells),
-            boundary_progress_bonus=float(level_delta),
+            components = RewardComponents(
+                level_delta_reward=float(level_delta),
+                win_bonus=1.0 if frame_state == GameState.WIN.name else 0.0,
+                game_over_penalty=1.0 if frame_state == GameState.GAME_OVER.name else 0.0,
+                step_penalty=float(max(1, steps_used)),
+                solver_surprise_bonus=float(surprise_signal),
+            )
+            return scalarize_solver(components), components
+        components = RewardComponents(
+            surprise=float(surprise_signal),
+            novelty=1.0 if changed_cells > 0 else 0.0,
+            transition_magnitude=float(changed_cells),
+            boundary_progress=float(level_delta),
         )
+        return scalarize_curiosity(components, boundary_type=boundary_type), components
 
     @staticmethod
     def _mode_to_boundary_level(mode_value: str) -> str:
@@ -611,6 +622,12 @@ class LS20GroupedRunner:
                     reward=c.sample.reward,
                     advantage=c.sample.advantage,
                     probability=c.sample.probability,
+                    reward_components={
+                        k: float(v)
+                        for k, v in (
+                            c.sample.metadata.get("reward_components", {}) or {}
+                        ).items()
+                    },
                     surprise=c.surprise_metrics,
                     metadata={
                         **c.sample.metadata,
@@ -636,6 +653,9 @@ class LS20GroupedRunner:
             memory_after=f"size={int(selected.sample.metadata.get('memory_after_count', len(selected.agent.memory)))}",
             semantic_report=selected.semantic_report,
             selected_index=selected_index,
+            reward_channel_version=str(
+                selected.sample.metadata.get("reward_channel_version", "v2")
+            ),
             candidates=candidate_rows,
             diagnostics={
                 "changed_cells": selected.changed_cells,

@@ -62,7 +62,7 @@ class LoopAgent(Agent):
     VLLM_API_KEY: str = os.environ.get("VLLM_API_KEY", "dummy")
 
     # Strategy switches
-    # Surprise is now self-rated by the learner LLM (no heuristic strategy).
+    # Surprise computed via World Model + Observer + Judge pipeline.
     MEMORY_PERSISTENCE_MODE: str = os.environ.get(
         "MEMORY_PERSISTENCE_MODE", "strict"
     ).lower()  # strict | carry | noisy
@@ -563,18 +563,32 @@ class LoopAgent(Agent):
                 num_changed_cells=num_changed,
             )
         else:
-            diagnosis_level: str | None = None
-            if action != GameAction.RESET:
-                # Diagnosis reads pre-update memory so a fresh edit does not mask mismatch.
-                diagnosis_level = self._run_mode_diagnosis(
-                    mode="action",
-                    expected=self._last_prediction,
-                    actual=state_after,
-                    subgoal_index=self._active_subgoal_index if self._active_subgoal else None,
-                    image_data_url=transition_image or state_after_image,
-                )
+            # --- World Model + Observer + Judge + Scribe pipeline ---
 
-            # Non-sequence step: learner update remains separate from diagnosis.
+            # 1. WORLD MODEL: predict what should have happened
+            predicted = self.learner.predict_outcome(
+                state_before=state_before,
+                action_taken=action.name,
+                memory=self.memory,
+                image_before_url=state_before_image,
+            )
+
+            # 2. OBSERVER: describe what actually happened
+            observed = self.learner.observe_transition(
+                state_before=state_before,
+                state_after=state_after,
+                diff_text=diff_text,
+                image_before_url=state_before_image,
+                image_after_url=state_after_image,
+                image_diff_url=transition_image,
+            )
+
+            # 3. JUDGE: score prediction accuracy
+            similarity = self.learner.judge_similarity(predicted, observed)
+            surprise_score = (6 - similarity) / 5.0  # normalize to [0, 1]
+            self._last_surprise_score = surprise_score
+
+            # 4. SCRIBE: update memory with full context
             if self._should_run_learner(num_changed, frame_after):
                 self._learner_update_best_of_n(
                     state_before=state_before,
@@ -592,6 +606,9 @@ class LoopAgent(Agent):
                     image_diff_url=transition_image,
                     rulebook_status=rulebook_after,
                     missing_action_lessons=missing_after_text,
+                    predicted_description=predicted,
+                    observed_description=observed,
+                    similarity=similarity,
                 )
                 self._learner_steps_since_consolidation += 1
             else:
@@ -599,26 +616,17 @@ class LoopAgent(Agent):
 
             self._maybe_consolidate_memory()
 
-            surprise_x10 = self.learner.self_rate_surprise(
-                state_before=state_before,
-                action_taken=action.name,
-                state_after=state_after,
-                diff_text=diff_text,
-                memory=self.memory,
-                mode=self.current_mode.value,
-                image_before_url=state_before_image,
-                image_after_url=state_after_image,
-                image_diff_url=transition_image,
-            )
-            surprise_score = surprise_x10 / 10.0  # normalize to [0, 1]
-            self._last_surprise_score = surprise_score
+            # Record surprise per level
             level = self._mode_to_level(self.current_mode)
             self._record_surprise(level, surprise_score)
+            game_event = None
+            if frame_after.state == GameState.GAME_OVER:
+                game_event = "GAME_OVER"
             self._route_mode_after_boundary(
                 state_text=state_after,
                 frame_after=frame_after,
-                diagnosis_level=diagnosis_level,
                 state_image_url=state_after_image,
+                game_event=game_event,
             )
 
         state_signature_after = self._frame_signature(frame_after)
@@ -717,16 +725,33 @@ class LoopAgent(Agent):
             missing_action_lessons=missing_after_list,
         )
 
-        diagnosis_level: str | None = None
-        if self._subgoal_sequence_level == "subgoal":
-            diagnosis_level = self._run_mode_diagnosis(
-                mode="subgoal",
-                expected=self._subgoal_sequence_expected or self._last_prediction,
-                actual=state_after,
-                subgoal_index=self._active_subgoal_index if self._active_subgoal else None,
-                image_data_url=transition_image or end_image,
-            )
+        # --- World Model + Observer + Judge + Scribe pipeline (boundary) ---
 
+        # 1. WORLD MODEL: predict what the subgoal sequence should have produced
+        predicted = self.learner.predict_outcome(
+            state_before=start_state,
+            action_taken=action_taken,
+            memory=self.memory,
+            image_before_url=start_image,
+        )
+
+        # 2. OBSERVER: describe what actually happened
+        observed = self.learner.observe_transition(
+            state_before=start_state,
+            state_after=state_after,
+            diff_text=diff_text,
+            image_before_url=start_image,
+            image_after_url=end_image,
+            image_diff_url=transition_image,
+        )
+
+        # 3. JUDGE: score prediction accuracy
+        similarity = self.learner.judge_similarity(predicted, observed)
+        surprise_score = (6 - similarity) / 5.0  # normalize to [0, 1]
+        self._last_surprise_score = surprise_score
+        self._record_surprise(self._subgoal_sequence_level, surprise_score)
+
+        # 4. SCRIBE: update memory with full context
         learner_changed = self._learner_update_best_of_n(
             state_before=start_state,
             action_taken=action_taken,
@@ -743,24 +768,12 @@ class LoopAgent(Agent):
             image_diff_url=transition_image,
             rulebook_status=rulebook_after,
             missing_action_lessons=missing_after_text,
+            predicted_description=predicted,
+            observed_description=observed,
+            similarity=similarity,
         )
         self._learner_steps_since_consolidation += 1
         self._maybe_consolidate_memory()
-
-        surprise_x10 = self.learner.self_rate_surprise(
-            state_before=start_state,
-            action_taken=action_taken,
-            state_after=state_after,
-            diff_text=diff_text,
-            memory=self.memory,
-            mode=self.current_mode.value,
-            image_before_url=start_image,
-            image_after_url=end_image,
-            image_diff_url=transition_image,
-        )
-        surprise_score = surprise_x10 / 10.0
-        self._last_surprise_score = surprise_score
-        self._record_surprise(self._subgoal_sequence_level, surprise_score)
 
         if self._subgoal_sequence_is_explore:
             self.explore_actions_taken += 1
@@ -782,13 +795,6 @@ class LoopAgent(Agent):
         if self._subgoal_sequence_level == "plan":
             plan_attempt_ended = terminal or (reason == "exhausted" and not advanced)
             if plan_attempt_ended:
-                diagnosis_level = self._run_mode_diagnosis(
-                    mode="plan",
-                    expected=self._active_plan_text or self._subgoal_sequence_expected,
-                    actual=state_after,
-                    subgoal_index=self._active_subgoal_index if self._active_subgoal else None,
-                    image_data_url=transition_image or end_image,
-                )
                 self._plan_attempt_active = False
                 self._plan_attempt_start_state = None
                 self._plan_attempt_start_grid = None
@@ -805,11 +811,14 @@ class LoopAgent(Agent):
                 self._plan_attempt_start_state = None
                 self._plan_attempt_start_grid = None
 
+        game_event = None
+        if frame_after.state == GameState.GAME_OVER:
+            game_event = "GAME_OVER"
         self._route_mode_after_boundary(
             state_text=state_after,
             frame_after=frame_after,
-            diagnosis_level=diagnosis_level,
             state_image_url=end_image,
+            game_event=game_event,
         )
 
         self._reset_subgoal_sequence_state(clear_pending=True)
@@ -1369,6 +1378,9 @@ class LoopAgent(Agent):
         image_diff_url: str | None,
         rulebook_status: str,
         missing_action_lessons: str,
+        predicted_description: str = "",
+        observed_description: str = "",
+        similarity: int = 0,
     ) -> bool:
         action_history = self._action_history_text()
         n = max(1, self.LEARNER_NUM_SAMPLES)
@@ -1390,6 +1402,9 @@ class LoopAgent(Agent):
                 rulebook_status=rulebook_status,
                 missing_action_lessons=missing_action_lessons,
                 action_history=action_history,
+                predicted_description=predicted_description,
+                observed_description=observed_description,
+                similarity=similarity,
             )
 
         original_nones = self.learner.consecutive_nones
@@ -1416,6 +1431,9 @@ class LoopAgent(Agent):
                 rulebook_status=rulebook_status,
                 missing_action_lessons=missing_action_lessons,
                 action_history=action_history,
+                predicted_description=predicted_description,
+                observed_description=observed_description,
+                similarity=similarity,
             )
             answer_text = self.learner.last_answer_output
             raw_text = self.learner.last_raw_output
@@ -1509,35 +1527,30 @@ class LoopAgent(Agent):
         self.level_controller.surprise_history[level_key].append(surprise)
         self.level_controller.current_level = level_key
 
+    def _surprise_summary_text(self) -> str:
+        """Build per-level surprise summary for the router prompt."""
+        lines = []
+        for level_key in ("action", "subgoal", "plan"):
+            history = self.level_controller.surprise_history.get(level_key, [])
+            if not history:
+                lines.append(f"  {level_key}: no data")
+                continue
+            avg = sum(history) / len(history)
+            last_5 = history[-5:]
+            last_5_str = ", ".join(f"{v:.2f}" for v in last_5)
+            lines.append(
+                f"  {level_key}: avg={avg:.2f}, last_5=[{last_5_str}], total={len(history)}"
+            )
+        return "\n".join(lines)
+
     def _route_mode_after_boundary(
         self,
         state_text: str,
         frame_after: FrameData,
-        diagnosis_level: str | None,
         state_image_url: str | None = None,
+        game_event: str | None = None,
     ) -> None:
         self._mode_boundary_counts[self.current_mode.value] += 1
-
-        if frame_after.state == GameState.GAME_OVER:
-            diagnosis = self.learner.diagnose(
-                expected=self._last_prediction or "continued progress",
-                actual="GAME_OVER",
-                memory=self.memory,
-                image_data_url=state_image_url,
-            )
-            target_level = diagnosis.get("level", "action") if diagnosis else "action"
-            self._set_mode(
-                self._level_to_mode(target_level),
-                reason=f"GAME_OVER diagnosis -> {target_level}",
-            )
-            return
-
-        if diagnosis_level:
-            self._set_mode(
-                self._level_to_mode(diagnosis_level),
-                reason=f"unexpected outcome diagnosed at {diagnosis_level}",
-            )
-            return
 
         if self._mode_switch_cooldown_remaining > 0:
             self._mode_switch_cooldown_remaining -= 1
@@ -1565,6 +1578,8 @@ class LoopAgent(Agent):
             missing_action_lessons=", ".join(missing_actions) if missing_actions else "none",
             semantic_discovery_status=self._semantic_discovery_status(state_text),
             action_history=self._action_history_text(),
+            game_event=game_event or "none",
+            surprise_summary=self._surprise_summary_text(),
         )
         proposed_mode = str(mode_result.get("mode", self.current_mode.value)).upper()
         try:
@@ -1577,45 +1592,6 @@ class LoopAgent(Agent):
     def _gate_router_mode(self, proposed_mode: DecisionMode) -> DecisionMode:
         """Pass through the router's mode decision without heuristic gates."""
         return proposed_mode
-
-    def _run_mode_diagnosis(
-        self,
-        mode: str,
-        expected: str,
-        actual: str,
-        subgoal_index: int | None,
-        image_data_url: str | None = None,
-    ) -> str | None:
-        """Run expectation diagnosis and return a routed level on mismatch."""
-        diagnosis = self.learner.assess_expectation(
-            expected=expected or "no prediction",
-            actual=actual,
-            memory=self.memory,
-            mode=mode,
-            subgoal_index=subgoal_index,
-            image_data_url=image_data_url,
-        )
-        if not diagnosis:
-            return None
-
-        verdict = diagnosis.get("verdict", "")
-        confidence = float(diagnosis.get("confidence", 0.0))
-        level = str(diagnosis.get("level", mode)).lower()
-        if level not in {"action", "subgoal", "plan"}:
-            level = mode
-
-        if verdict == "unexpected" and confidence >= self.MISMATCH_CONF_THRESHOLD:
-            self._last_boundary_diagnosis_level = level
-            logger.info(
-                "Diagnosis mismatch: mode=%s -> level=%s (conf=%.2f)",
-                mode,
-                level,
-                confidence,
-            )
-            return level
-        if verdict == "expected" and confidence >= self.MISMATCH_CONF_THRESHOLD:
-            self._last_boundary_diagnosis_level = "none"
-        return None
 
     def _on_full_reset(self) -> None:
         """Handle full game reset with configurable memory persistence."""
