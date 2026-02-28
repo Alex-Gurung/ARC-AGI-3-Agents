@@ -28,6 +28,10 @@ You are building a knowledge base about a game by observing what happens after e
 - ACTION: ONLY basic movement mechanics (e.g., "ACTION1 moves player up 1 cell"). Do not re-add actions already in memory.
 
 IMPORTANT: Check MEMORY below before adding anything. If a similar entry exists, use MODIFY to refine it or output NONE. Do NOT add duplicates. Actively REMOVE outdated, wrong, or redundant entries to keep memory clean.
+When useful, explicitly write hypotheses at multiple abstraction levels:
+- action hypothesis: what a specific action does
+- subgoal-effect hypothesis: what completing/attempting a subgoal changes
+- plan-strategy hypothesis: when a strategy works or fails
 
 PHASE: {phase}
 LEVEL: {level}
@@ -80,6 +84,23 @@ Which specific memory entry (by index) is most likely wrong?
 
 Briefly think step by step, then output exactly one final line:
 ANSWER: level=<action|subgoal|plan> index=<n or none>"""
+
+EXPECTATION_ASSESS_PROMPT = """\
+You are checking whether an observed outcome matched what our current memory predicted.
+
+MODE: {mode}
+SUBGOAL_INDEX: {subgoal_index}
+EXPECTED: {expected}
+ACTUAL: {actual}
+
+MEMORY:
+{memory_text}
+
+Decide if ACTUAL matched EXPECTED from memory.
+
+Output exactly one final line:
+ANSWER: verdict=<expected|unexpected> conf=<0.00-1.00> level=<action|subgoal|plan> ref=<id|none>
+"""
 
 
 class Learner:
@@ -193,6 +214,29 @@ class Learner:
         self.last_answer_output = answer_output
         return self._parse_diagnosis(answer_output)
 
+    def assess_expectation(
+        self,
+        expected: str,
+        actual: str,
+        memory: Memory,
+        mode: str,
+        subgoal_index: int | None = None,
+    ) -> Optional[dict]:
+        """Assess whether the observed result was expected from memory."""
+        memory_text = memory.to_text() if memory else "empty"
+        prompt = EXPECTATION_ASSESS_PROMPT.format(
+            mode=mode,
+            subgoal_index=str(subgoal_index) if subgoal_index is not None else "none",
+            expected=expected or "no prediction",
+            actual=actual,
+            memory_text=memory_text,
+        )
+        raw_output = self._call_llm(prompt)
+        answer_output = self._extract_answer(raw_output)
+        self.last_raw_output = raw_output
+        self.last_answer_output = answer_output
+        return self._parse_expectation_assessment(answer_output)
+
     def _call_llm(self, prompt: str) -> str:
         """Call the LLM with a single prompt."""
         try:
@@ -249,6 +293,36 @@ class Learner:
             return inline[-1].strip()
 
         return text
+
+    def _parse_expectation_assessment(self, raw_output: str) -> Optional[dict]:
+        """Parse expectation-assessment schema from model output."""
+        text = raw_output.strip()
+        match = re.search(
+            r"verdict\s*=\s*(expected|unexpected)\s+"
+            r"conf\s*=\s*([01](?:\.\d+)?)\s+"
+            r"level\s*=\s*(action|subgoal|plan)\s+"
+            r"ref\s*=\s*([A-Za-z0-9_-]+|none)",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            logger.warning(f"Could not parse expectation assessment from: {raw_output[:120]}")
+            return None
+
+        verdict = match.group(1).lower()
+        confidence = max(0.0, min(1.0, float(match.group(2))))
+        level = match.group(3).lower()
+        entry_ref = match.group(4)
+        if entry_ref.lower() == "none":
+            entry_ref = None
+
+        return {
+            "verdict": verdict,
+            "confidence": confidence,
+            "level": level,
+            "entry_ref": entry_ref,
+            "raw": raw_output,
+        }
 
     @property
     def memory_is_stable(self) -> bool:

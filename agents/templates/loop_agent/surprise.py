@@ -267,6 +267,14 @@ class LevelController:
         else:
             logger.warning(f"Invalid level for diagnosis: {level}")
 
+    def regress_one_level(self) -> str:
+        """Regress one abstraction level (plan->subgoal->action)."""
+        previous = self._prev_level(self.current_level)
+        if previous != self.current_level:
+            logger.info(f"Level controller: {self.current_level} -> {previous} (regress)")
+            self.current_level = previous
+        return self.current_level
+
     def reset(self) -> None:
         """Reset level controller state."""
         self.current_level = "action"
@@ -274,6 +282,9 @@ class LevelController:
 
     def _next_level(self, level: str) -> str:
         return {"action": "subgoal", "subgoal": "plan", "plan": "plan"}[level]
+
+    def _prev_level(self, level: str) -> str:
+        return {"action": "action", "subgoal": "action", "plan": "subgoal"}[level]
 
     @property
     def is_at_plan_level(self) -> bool:

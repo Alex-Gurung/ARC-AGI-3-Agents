@@ -1,7 +1,7 @@
 """Interactive Rich TUI debugger for the LoopAgent.
 
-Step through the agent's explore-learn-exploit loop on a live game,
-watching the grid, memory, LLM prompts/outputs, and phase transitions
+Step through the agent's mode-routed loop on a live game,
+watching the grid, memory, LLM prompts/outputs, and mode transitions
 in real-time.
 
 Usage:
@@ -17,23 +17,19 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 from dotenv import load_dotenv
-
-load_dotenv(dotenv_path=".env.example")
-load_dotenv(dotenv_path=".env", override=True)
-
 from rich.color import Color
 from rich.columns import Columns
 from rich.console import Console, Group
-from rich.layout import Layout
 from rich.panel import Panel
 from rich.style import Style
 from rich.table import Table
 from rich.text import Text
 
-from arcengine import GameState
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+load_dotenv(dotenv_path=".env.example")
+load_dotenv(dotenv_path=".env", override=True)
 
 # Suppress noisy loggers — we show everything in the TUI instead.
 logging.basicConfig(level=logging.WARNING)
@@ -74,6 +70,20 @@ MEMORY_TYPE_COLORS: dict[str, str] = {
     "OBSERVATION": "white",
 }
 
+MODE_STYLES: dict[str, str] = {
+    "LEARN_ACTION": "bold bright_blue",
+    "LEARN_SUBGOAL": "bold cyan",
+    "LEARN_PLAN": "bold bright_magenta",
+    "SOLVE": "bold red",
+}
+
+MODE_BORDER: dict[str, str] = {
+    "LEARN_ACTION": "bright_blue",
+    "LEARN_SUBGOAL": "cyan",
+    "LEARN_PLAN": "bright_magenta",
+    "SOLVE": "red",
+}
+
 
 # ---------------------------------------------------------------------------
 # Step data — everything captured per agent step
@@ -82,8 +92,7 @@ MEMORY_TYPE_COLORS: dict[str, str] = {
 class StepData:
     step: int = 0
     action_name: str = ""
-    phase: str = ""
-    level: str = ""
+    mode: str = ""
     prediction: str = ""
     surprise: float = 0.0
     learner_changed: bool = False
@@ -96,6 +105,7 @@ class StepData:
     plan: str = ""
     queued: int = 0
     in_subgoal_seq: bool = False
+    diagnosis: str = ""
 
 
 @dataclass
@@ -104,24 +114,20 @@ class Captures:
     curiosity: dict[str, Any] = field(default_factory=dict)
     solver: dict[str, Any] = field(default_factory=dict)
     learner: dict[str, Any] = field(default_factory=dict)
+    router: dict[str, Any] = field(default_factory=dict)
     last_surprise: float = 0.0
+    _router_context: bool = False
 
 
 # ---------------------------------------------------------------------------
 # Rendering helpers
 # ---------------------------------------------------------------------------
 
-def _color_style(color_idx: int, bg: bool = False) -> str:
-    """Return a Rich color string for the given ARC color index."""
-    r, g, b = ARC_PALETTE.get(color_idx, (128, 128, 128))
-    return f"{'on ' if bg else ''}rgb({r},{g},{b})"
-
-
 def render_grid(grid: list[list[int]]) -> Text:
-    """Render 64x64 grid using Unicode half-blocks (▀).
+    """Render 64x64 grid using Unicode half-blocks.
 
     Packs 2 grid rows into 1 terminal row. The top pixel is the foreground
-    color and the bottom pixel is the background color of each ▀ character.
+    color and the bottom pixel is the background color of each character.
     """
     if not grid:
         return Text("(no grid)")
@@ -140,7 +146,7 @@ def render_grid(grid: list[list[int]]) -> Text:
                 color=Color.from_rgb(r_top, g_top, b_top),
                 bgcolor=Color.from_rgb(r_bot, g_bot, b_bot),
             )
-            text.append("▀", style=style)
+            text.append("\u2580", style=style)
         text.append("\n")
 
     return text
@@ -167,7 +173,7 @@ def render_memory(memory: Any) -> Panel:
         lines.append(content, style="white")
         # Confidence bar
         bar_len = int(entry.confidence * 10)
-        bar = "█" * bar_len + "░" * (10 - bar_len)
+        bar = "\u2588" * bar_len + "\u2591" * (10 - bar_len)
         conf_color = "green" if entry.confidence >= 0.7 else "yellow" if entry.confidence >= 0.4 else "red"
         lines.append(f" {bar} ", style=conf_color)
         lines.append(f"{entry.confidence:.2f}", style="dim")
@@ -186,8 +192,6 @@ def render_status(agent: Any, step_data: StepData) -> Panel:
     t.add_column(ratio=1)
     t.add_column(ratio=1)
     t.add_column(ratio=1)
-
-    phase_style = "bold green" if step_data.phase == "EXPLORE" else "bold red"
 
     t.add_row(
         Text.assemble(
@@ -215,11 +219,11 @@ def render_status(agent: Any, step_data: StepData) -> Panel:
         Text.assemble(("Learner: ", "dim"), (learner_text, learner_style)),
     )
 
-    # Third row: levels, state, budget, stability
-    stability = getattr(agent.learner, "consecutive_nones", 0)
-    explore_taken = getattr(agent, "explore_actions_taken", 0)
-    explore_budget = getattr(agent, "explore_budget", 0)
+    # Third row: levels, state, diagnosis, sequence status
     win_levels = getattr(agent.frames[-1], "win_levels", "?") if agent.frames else "?"
+    diagnosis = step_data.diagnosis
+    diag_style = "bold yellow" if diagnosis and diagnosis != "none" else "dim"
+    diag_text = diagnosis if diagnosis and diagnosis != "none" else "-"
 
     t.add_row(
         Text.assemble(
@@ -229,23 +233,24 @@ def render_status(agent: Any, step_data: StepData) -> Panel:
             (step_data.game_state, ""),
         ),
         Text.assemble(
-            ("Budget: ", "dim"),
-            (f"{explore_taken}/{explore_budget}", ""),
-            (" explore", "dim"),
+            ("Diagnosis: ", "dim"),
+            (diag_text, diag_style),
             (f"  Queued: {step_data.queued}", "dim"),
         ),
         Text.assemble(
-            ("Stable: ", "dim"),
-            (f"{stability}/5", "green" if stability >= 5 else ""),
-            ("  Seq: ", "dim"),
+            ("Seq: ", "dim"),
             ("active" if step_data.in_subgoal_seq else "-", "cyan" if step_data.in_subgoal_seq else "dim"),
         ),
     )
 
+    mode = step_data.mode
+    mode_style = MODE_STYLES.get(mode, "bold")
+    border = MODE_BORDER.get(mode, "bright_black")
+
     return Panel(
         t,
-        title=f"[{phase_style}]{step_data.phase}[/] │ Level: {step_data.level}",
-        border_style="green" if step_data.phase == "EXPLORE" else "red",
+        title=f"[{mode_style}]{mode}[/]",
+        border_style=border,
     )
 
 
@@ -257,7 +262,7 @@ def render_llm_io(captures: Captures, agent: Any = None) -> Panel:
     """
     sections: list[Text] = []
 
-    for name, color in [("curiosity", "cyan"), ("solver", "magenta"), ("learner", "yellow")]:
+    for name, color in [("curiosity", "cyan"), ("solver", "magenta"), ("learner", "yellow"), ("router", "bright_magenta")]:
         data = getattr(captures, name, {})
         if not data:
             continue
@@ -266,12 +271,12 @@ def render_llm_io(captures: Captures, agent: Any = None) -> Panel:
         output = data.get("output", "")
 
         header = Text()
-        header.append(f"── {name.capitalize()} ", style=f"bold {color}")
+        header.append(f"\u2500\u2500 {name.capitalize()} ", style=f"bold {color}")
 
         # Show key prompt context on the header line
         if prompt:
             ctx_parts = []
-            for marker in ["PREDICTION:", "SUBGOAL:", "PLAN:"]:
+            for marker in ["PREDICTION:", "SUBGOAL:", "PLAN:", "CURRENT_MODE:"]:
                 for pline in prompt.splitlines():
                     if marker in pline:
                         val = pline.split(marker, 1)[1].strip()[:60]
@@ -283,14 +288,13 @@ def render_llm_io(captures: Captures, agent: Any = None) -> Panel:
 
         sections.append(header)
 
-        # Full model output — this is the interesting part
+        # Full model output
         if output:
             for out_line in output.strip().splitlines():
                 stripped = out_line.strip()
                 if not stripped:
                     continue
                 line_text = Text()
-                # Highlight ANSWER/EXPECTED lines
                 if stripped.upper().startswith("ANSWER"):
                     line_text.append(f"  {stripped}", style=f"bold {color}")
                 elif stripped.upper().startswith("EXPECTED"):
@@ -324,24 +328,22 @@ def render_history(history: list[StepData], max_rows: int = 12) -> Panel:
     )
     table.add_column("Step", style="dim", width=4, justify="right")
     table.add_column("Action", width=10)
-    table.add_column("Phase", width=8)
-    table.add_column("Level", width=8)
+    table.add_column("Mode", width=14)
     table.add_column("Surpr", width=6, justify="right")
-    table.add_column("ΔMem", width=5, justify="right")
+    table.add_column("\u0394Mem", width=5, justify="right")
     table.add_column("Prediction", ratio=1, max_width=80)
 
     visible = history[-max_rows:]
     for sd in visible:
-        phase_style = "green" if sd.phase == "EXPLORE" else "red"
+        mode_style = MODE_STYLES.get(sd.mode, "")
         mem_delta = sd.memory_size_after - sd.memory_size_before
-        mem_str = f"+{mem_delta}" if mem_delta > 0 else str(mem_delta) if mem_delta < 0 else "·"
+        mem_str = f"+{mem_delta}" if mem_delta > 0 else str(mem_delta) if mem_delta < 0 else "\u00b7"
         mem_style = "yellow" if mem_delta != 0 else "dim"
 
         table.add_row(
             str(sd.step),
             sd.action_name,
-            Text(sd.phase[:7], style=phase_style),
-            sd.level,
+            Text(sd.mode, style=mode_style),
             f"{sd.surprise:.3f}",
             Text(mem_str, style=mem_style),
             Text(sd.prediction if sd.prediction else "-", style="dim italic"),
@@ -353,20 +355,17 @@ def render_history(history: list[StepData], max_rows: int = 12) -> Panel:
 def build_header(agent: Any, step: int) -> Text:
     """Build the top header bar."""
     game_id = getattr(agent, "game_id", "?")
-    max_actions = getattr(agent, "MAX_ACTIONS", 80)
-    phase = agent.phase.value if hasattr(agent, "phase") else "?"
-    level = agent.level_controller.current_level if hasattr(agent, "level_controller") else "?"
-    phase_style = "bold green" if phase == "EXPLORE" else "bold red"
+    max_actions = getattr(agent, "MAX_ACTIONS", 200)
+    mode = agent.current_mode.value if hasattr(agent, "current_mode") else "?"
+    mode_style = MODE_STYLES.get(mode, "bold")
 
     t = Text()
     t.append(f" Game: {game_id} ", style="bold")
-    t.append("│", style="dim")
+    t.append("\u2502", style="dim")
     t.append(f" Step {step}/{max_actions} ", style="bold")
-    t.append("│", style="dim")
-    t.append(f" Phase: ", style="dim")
-    t.append(f"{phase} ", style=phase_style)
-    t.append("│", style="dim")
-    t.append(f" Level: {level} ", style="")
+    t.append("\u2502", style="dim")
+    t.append(" Mode: ", style="dim")
+    t.append(f"{mode} ", style=mode_style)
     return t
 
 
@@ -375,27 +374,45 @@ def build_header(agent: Any, step: int) -> Text:
 # ---------------------------------------------------------------------------
 
 def instrument_agent(agent: Any, captures: Captures) -> None:
-    """Monkey-patch _call_llm on all LLM-using components to capture I/O."""
+    """Monkey-patch _call_llm on all LLM-using components to capture I/O.
+
+    Uses a router-context flag so that when curiosity.propose_mode() calls
+    _call_llm, the output is routed to captures.router instead of
+    captures.curiosity.
+    """
     for name in ["curiosity", "solver", "learner"]:
         component = getattr(agent, name, None)
         if component is None or not hasattr(component, "_call_llm"):
             continue
         original_fn = component._call_llm
 
-        # Use default arg to bind the current values of name/original_fn
         def make_wrapper(comp_name: str, orig: Any) -> Any:
             def wrapper(prompt: str, *args: Any, **kwargs: Any) -> str:
+                target = "router" if (comp_name == "curiosity" and captures._router_context) else comp_name
                 cap = {"prompt": prompt, "output": None}
-                setattr(captures, comp_name, cap)
+                setattr(captures, target, cap)
                 result = orig(prompt, *args, **kwargs)
                 cap["output"] = result
-                setattr(captures, comp_name, cap)
+                setattr(captures, target, cap)
                 return result
             return wrapper
 
         component._call_llm = make_wrapper(name, original_fn)
 
-    # Also capture surprise scores
+    # Wrap propose_mode to set router context flag
+    if hasattr(agent.curiosity, "propose_mode"):
+        orig_propose_mode = agent.curiosity.propose_mode
+
+        def mode_wrapper(*args: Any, **kwargs: Any) -> Any:
+            captures._router_context = True
+            try:
+                return orig_propose_mode(*args, **kwargs)
+            finally:
+                captures._router_context = False
+
+        agent.curiosity.propose_mode = mode_wrapper
+
+    # Capture surprise scores
     if hasattr(agent, "surprise") and hasattr(agent.surprise, "compute"):
         orig_compute = agent.surprise.compute
 
@@ -425,9 +442,10 @@ def run(
         os.environ["VLLM_MODEL"] = model
 
     from arc_agi import Arcade
+
     from agents.templates.loop_agent import LoopAgent
 
-    console.print(f"\n[bold]Starting LoopAgent debugger[/bold]")
+    console.print("\n[bold]Starting LoopAgent debugger[/bold]")
     console.print(f"  Game:  {game_id}")
     console.print(f"  VLLM:  {os.environ.get('VLLM_BASE_URL', 'http://localhost:8000/v1')}")
     console.print(f"  Model: {os.environ.get('VLLM_MODEL', 'google/gemma-3-1b-it')}")
@@ -474,7 +492,7 @@ def run(
             grid_before = latest_frame.frame[-1] if latest_frame.frame else []
 
             mem_size_before = len(agent.memory)
-            phase_before = agent.phase.value
+            mode_before = agent.current_mode.value
 
             # --- Choose + execute ---
             action = agent.choose_action(agent.frames, latest_frame)
@@ -486,12 +504,11 @@ def run(
 
             agent.action_counter += 1
 
-            # --- Collect step data ---
+            # --- Collect step data (after _post_step so mode routing has run) ---
             sd = StepData(
                 step=agent.action_counter,
                 action_name=action.name,
-                phase=agent.phase.value,
-                level=agent.level_controller.current_level,
+                mode=agent.current_mode.value,
                 prediction=agent._last_prediction,
                 surprise=captures.last_surprise,
                 learner_changed=(len(agent.memory) != mem_size_before),
@@ -504,6 +521,7 @@ def run(
                 plan=agent._active_plan_text or "",
                 queued=len(agent._pending_subgoal_actions),
                 in_subgoal_seq=agent._subgoal_sequence_active,
+                diagnosis=getattr(agent, "_last_boundary_diagnosis_level", "none"),
             )
             history.append(sd)
 
@@ -537,10 +555,17 @@ def run(
             # History
             console.print(render_history(history))
 
-            # Phase transition indicator
-            if sd.phase != phase_before:
+            # Mode transition indicator
+            if sd.mode != mode_before:
+                mode_before_style = MODE_STYLES.get(mode_before, "")
+                mode_after_style = MODE_STYLES.get(sd.mode, "")
                 console.print(
-                    f"  [bold yellow]>>> PHASE TRANSITION: {phase_before} → {sd.phase}[/bold yellow]"
+                    Text.assemble(
+                        ("  >>> MODE TRANSITION: ", "bold yellow"),
+                        (mode_before, mode_before_style),
+                        (" \u2192 ", "bold yellow"),
+                        (sd.mode, mode_after_style),
+                    )
                 )
 
             # Footer
@@ -583,6 +608,9 @@ def run(
             pass
 
     # Final summary
+    final_mode = agent.current_mode.value if hasattr(agent, "current_mode") else "?"
+    final_mode_style = MODE_STYLES.get(final_mode, "bold")
+
     console.print("\n")
     console.print(Panel(
         Group(
@@ -593,6 +621,7 @@ def run(
                 (agent.frames[-1].state.name if agent.frames else "?", "bold"), "\n",
                 ("Levels completed: ", "dim"),
                 (str(agent.frames[-1].levels_completed if agent.frames else 0), "bold"), "\n",
+                ("Final mode: ", "dim"), (final_mode, final_mode_style), "\n",
                 ("Memory entries: ", "dim"), (str(len(agent.memory)), "bold"), "\n",
             ),
             render_history(history, max_rows=30),

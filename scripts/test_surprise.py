@@ -11,17 +11,16 @@ Usage:
 """
 
 import argparse
-import sys
 import os
+import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from agents.templates.loop_agent.memory import Memory, MemoryEntry
+from agents.templates.loop_agent.memory import Memory
 from agents.templates.loop_agent.surprise import (
     HeuristicSurprise,
     LevelController,
     LogProbSurprise,
-    SurpriseStrategy,
 )
 
 
@@ -151,6 +150,14 @@ def test_level_controller():
     ctrl.diagnose_to_level("action")
     print(f"  After diagnosis to action: {ctrl.current_level}")
     assert ctrl.current_level == "action"
+
+    # Test one-level regression helper
+    ctrl.current_level = "plan"
+    ctrl.regress_one_level()
+    assert ctrl.current_level == "subgoal"
+    ctrl.regress_one_level()
+    assert ctrl.current_level == "action"
+    print(f"  After regress_one_level x2: {ctrl.current_level}")
 
     # Test reset
     ctrl.reset()

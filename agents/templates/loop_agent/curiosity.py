@@ -85,6 +85,58 @@ Propose a strategy to test as ordered subgoals (max 5):
 Briefly think step by step, then output exactly one final line:
 ANSWER: <step1>; <step2>; <step3>"""
 
+MODE_ROUTER_PROMPT = """\
+You are controlling which mode the agent should use next.
+
+Modes:
+- LEARN_ACTION: test primitive actions and immediate mechanics
+- LEARN_SUBGOAL: test short subgoal hypotheses (<=20 actions each)
+- LEARN_PLAN: test full strategies made of subgoals
+- SOLVE: use current understanding to complete the level
+
+CURRENT_MODE: {current_mode}
+LAST_DIAGNOSIS_LEVEL: {last_diagnosis_level}
+LAST_PREDICTION: {last_prediction}
+ACTIVE_PLAN: {active_plan}
+ACTIVE_SUBGOAL: {active_subgoal}
+AVAILABLE_ACTIONS: {available_actions_str}
+
+STATE:
+{state_text}
+
+MEMORY:
+{memory_text}
+
+Briefly think step by step, then output exactly one final line:
+ANSWER: <LEARN_ACTION|LEARN_SUBGOAL|LEARN_PLAN|SOLVE>
+"""
+
+EXPLORE_SUBGOAL_SEQUENCE_PROMPT = """\
+You are exploring a game and currently testing a subgoal.
+Definition: a subgoal is a short plan (up to {max_steps} actions) expected to cause a significant, testable state change that should help level completion.
+
+PHASE: {phase}
+LEVEL: {level}
+SUBGOAL_INDEX: {subgoal_index}
+
+STATE:
+{state_text}
+
+MEMORY:
+{memory_text}
+
+ACTIVE_SUBGOAL: {active_subgoal}
+
+Propose a subgoal attempt that teaches us something.
+Use only: {available_actions_str}
+If ACTION6 is used, include coordinates as ACTION6 x y.
+
+Briefly think step by step, then output exactly four final lines:
+SUBGOAL: <short subgoal statement>
+SUCCESS_TEST: <observable condition showing subgoal success/failure>
+ACTION_SEQUENCE: action1, action2, action3
+EXPECTED: <short description of expected outcome>"""
+
 
 class Curiosity:
     """Proposes exploratory actions at the assigned abstraction level."""
@@ -216,6 +268,34 @@ class Curiosity:
                 "raw": raw_output,
             }
 
+    def propose_mode(
+        self,
+        state_text: str,
+        memory: Memory,
+        available_actions: list[str],
+        current_mode: str,
+        active_plan: str,
+        active_subgoal: str,
+        last_prediction: str,
+        last_diagnosis_level: str,
+    ) -> dict[str, Any]:
+        """Choose the next top-level control mode."""
+        memory_text = memory.to_text() if memory else "empty"
+        prompt = MODE_ROUTER_PROMPT.format(
+            current_mode=current_mode,
+            last_diagnosis_level=last_diagnosis_level or "none",
+            last_prediction=last_prediction or "none",
+            active_plan=active_plan or "none",
+            active_subgoal=active_subgoal or "none",
+            available_actions_str=", ".join(available_actions),
+            state_text=state_text,
+            memory_text=memory_text,
+        )
+        raw_output = self._call_llm(prompt)
+        answer_output = self._extract_answer(raw_output)
+        mode = self._parse_mode(answer_output)
+        return {"mode": mode, "raw": raw_output}
+
     def _call_llm(self, prompt: str) -> str:
         """Call the LLM with a single prompt, return raw text output."""
         try:
@@ -230,6 +310,85 @@ class Curiosity:
         except Exception as e:
             logger.error(f"Curiosity LLM call failed: {e}")
             return ""
+
+    def propose_subgoal_actions(
+        self,
+        state_text: str,
+        memory: Memory,
+        available_actions: list[str],
+        max_steps: int,
+        active_subgoal: str,
+        phase: str = "EXPLORE",
+        level: str = "subgoal",
+        subgoal_index: int | None = None,
+    ) -> dict[str, Any]:
+        """Propose exploratory action sequence for a target subgoal."""
+        memory_text = memory.to_text() if memory else "empty"
+        stage_subgoal_index = str(subgoal_index) if subgoal_index is not None else "none"
+        prompt = EXPLORE_SUBGOAL_SEQUENCE_PROMPT.format(
+            phase=phase,
+            level=level,
+            subgoal_index=stage_subgoal_index,
+            state_text=state_text,
+            memory_text=memory_text,
+            active_subgoal=active_subgoal or "none",
+            available_actions_str=", ".join(available_actions),
+            max_steps=max_steps,
+        )
+        raw_output = self._call_llm(prompt)
+        subgoal_text = self._extract_labeled_value(raw_output, "SUBGOAL") or active_subgoal
+        success_test = self._extract_labeled_value(raw_output, "SUCCESS_TEST")
+        action_payload = self._extract_labeled_value(raw_output, "ACTION_SEQUENCE")
+        answer_output = action_payload or self._extract_answer(raw_output)
+        prediction = self._extract_expected(raw_output)
+        actions = self._parse_action_list(answer_output, available_actions, max_steps)
+        return {
+            "subgoal": (subgoal_text or "").strip(),
+            "success_test": (success_test or "").strip(),
+            "actions": actions,
+            "prediction": prediction,
+            "raw": raw_output,
+        }
+
+    def _parse_action_list(
+        self,
+        raw_output: str,
+        available_actions: list[str],
+        max_steps: int,
+    ) -> list[str]:
+        """Parse a comma/space separated list of actions, preserving ACTION6 coords."""
+        text = raw_output.upper()
+        out: list[str] = []
+
+        action6_matches = re.findall(r"ACTION6\s*\(?\s*(\d+)\s*[, ]\s*(\d+)\s*\)?", text)
+        action6_full: list[str] = []
+        for x_str, y_str in action6_matches:
+            x = max(0, min(63, int(x_str)))
+            y = max(0, min(63, int(y_str)))
+            action6_full.append(f"ACTION6 {x} {y}")
+
+        generic = re.findall(r"RESET|ACTION\s*\d+", text)
+        for token in generic:
+            token = token.replace(" ", "")
+            if token == "ACTION6":
+                if action6_full:
+                    out.extend(action6_full)
+                elif "ACTION6" in available_actions:
+                    out.append("ACTION6 32 32")
+            elif token in available_actions:
+                out.append(token)
+
+        valid: list[str] = []
+        for action in out:
+            if action.startswith("ACTION6"):
+                if "ACTION6" in available_actions:
+                    valid.append(action)
+            elif action in available_actions:
+                valid.append(action)
+
+        if not valid:
+            return [self._parse_action(raw_output, available_actions)]
+        return valid[: max(1, max_steps)]
 
     def _parse_action(self, raw_output: str, available_actions: list[str]) -> str:
         """Parse an action name from LLM output.
@@ -296,6 +455,22 @@ class Curiosity:
         if len(inline) > 1:
             return inline[-1].strip().splitlines()[0].strip()
         return text
+
+    def _extract_labeled_value(self, raw_output: str, label: str) -> str:
+        """Extract value from 'LABEL: value' style lines."""
+        pattern = rf"(?im)^\s*{re.escape(label)}\s*:\s*(.+)$"
+        matches = re.findall(pattern, raw_output.strip())
+        if matches:
+            return matches[-1].strip()
+        return ""
+
+    def _parse_mode(self, raw_output: str) -> str:
+        text = raw_output.upper()
+        for mode in ("LEARN_ACTION", "LEARN_SUBGOAL", "LEARN_PLAN", "SOLVE"):
+            if mode in text:
+                return mode
+        logger.warning("Could not parse mode from router output; defaulting to LEARN_ACTION")
+        return "LEARN_ACTION"
 
     def parse_plan_steps(self, plan_text: str, max_steps: int = 5) -> list[str]:
         """Parse plan text into ordered subgoal steps."""

@@ -4,57 +4,65 @@
 
 ### Main Loop Cycle
 
-The agent runs an explore-learn-exploit loop, up to 80 steps per game.
+The agent runs a mode-routed loop, up to 200 steps per game by default.
 Execution is hierarchical: maintain an active plan and subgoal, execute
-short subgoal action sequences, then learn/update phase at sequence boundary.
+subgoal action sequences (up to 20 actions), then learn/update mode at
+sequence boundary.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
 │ GAME ENV → STATE ENCODER → state_text                               │
 │          (grid + actions)                                           │
 │                                                                      │
-│ EXPLORE path: Curiosity chooses action/subgoal/plan                  │
-│ EXPLOIT path: Solver uses active plan + active subgoal               │
+│ LEARN modes: Curiosity chooses action/subgoal/plan                   │
+│ SOLVE mode: Solver uses active plan + active subgoal                 │
 │                                                                      │
 │ If in subgoal sequence mode:                                         │
 │   propose_subgoal_actions() → execute queued actions open-loop       │
-│   (no learner/phase update until sequence boundary)                  │
+│   (no per-step memory writes; boundary update is authoritative)       │
+│                                                                      │
+│ Learn-subgoal / learn-plan attempts use soft RESET after boundary     │
+│   (RESET is control-flow only, not learning evidence)                │
 │                                                                      │
 │ Sequence boundary (or normal single-step path):                      │
 │   Learner update (ADD/MODIFY/REMOVE/NONE)                            │
 │   Surprise score (for Level Controller + metrics)                    │
-│   Phase update (driven by learner_changed/GAME_OVER)                 │
+│   Mode routing (diagnosis-directed or mode-router LLM)               │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
-### Phase Transitions
+### Mode Transitions
 
 ```
-                ┌──────────────────────────────────┐
-                │                                  │
-                │   memory stable (5+ NONEs)       │
-                │   OR explore budget exhausted    │
-                │                                  │
-    ╔═══════════▼══╗                  ╔════════════╧═══╗
-    ║              ║   learner        ║                ║
-    ║   EXPLORE    ║   changed     ◀──║    EXPLOIT     ║
-    ║              ║   memory         ║                ║
-    ║  Curiosity   ║◀─────────────────║  Solver picks  ║
-    ║  proposes    ║                  ║  best action   ║
-    ║  info-seeking║   GAME_OVER      ║  from memory   ║
-    ║  actions     ║◀──diagnose───────║                ║
-    ║              ║   + regress      ║                ║
-    ╚══════════════╝   level          ╚════════════════╝
+       ┌─────────────────────────────────────────────────────────┐
+       │ CURRENT_MODE ∈ {LEARN_ACTION, LEARN_SUBGOAL,          │
+       │                  LEARN_PLAN, SOLVE}                   │
+       └─────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+    boundary diagnosis unexpected (high confidence)?
+      yes -> route directly to diagnosed learn level:
+             action  -> LEARN_ACTION
+             subgoal -> LEARN_SUBGOAL
+             plan    -> LEARN_PLAN
+      no  -> Curiosity mode-router chooses next mode
+
+    GAME_OVER always overrides:
+      learner.diagnose(...) -> diagnosed level -> corresponding LEARN_* mode
 ```
 
-Note: during active subgoal sequences, `learner changed memory` is evaluated
-at `finalize_subgoal_sequence()` rather than every primitive action.
+Note: mode routing happens at boundaries. During active subgoal sequences,
+learner writes are boundary-level at `finalize_subgoal_sequence()`.
 
 ### Abstraction Levels
 
-The Level Controller advances when surprise converges (<5% change over
-a window of 5 steps). On GAME_OVER, the Learner diagnoses which level
-broke and the controller regresses to that level.
+Abstraction levels are still represented (`action/subgoal/plan`) but
+selection is controlled by `DecisionMode`:
+
+- `LEARN_ACTION` -> action-level exploration
+- `LEARN_SUBGOAL` -> subgoal-level exploration with action sequences
+- `LEARN_PLAN` -> plan-level exploration with subgoal attempts
+- `SOLVE` -> exploit current understanding to complete level
 
 ```
     ┌─────────────────────────────────────────────────────────────┐
@@ -62,8 +70,8 @@ broke and the controller regresses to that level.
     │  ┌──────────┐   converge   ┌──────────┐  converge  ┌─────┐│
     │  │  ACTION  │─────────────▶│ SUBGOAL  │───────────▶│PLAN ││
     │  │          │              │          │            │     ││
-    │  │ single   │◀─ diagnose ──│ sequence │◀─diagnose─│multi││
-    │  │ move     │              │ of 1-4   │           │step ││
+    │  │ single   │              │ sequence │          │multi││
+    │  │ move     │              │ of 1-20  │          │step ││
     │  │ per step │              │ actions  │           │strat││
     │  └──────────┘              └──────────┘            └─────┘│
     │                                                             │
@@ -114,22 +122,31 @@ broke and the controller regresses to that level.
 
 ### Subgoal Sequence Execution
 
-When at subgoal or plan level during EXPLOIT, the Solver proposes
-a short action sequence (1-4 actions) for the current subgoal.
-These are executed open-loop, then evaluated as a batch.
+A subgoal is defined in prompts as:
+"a short plan (<=20 actions) expected to produce a significant,
+testable state change that helps level completion."
+
+During LEARN_SUBGOAL / LEARN_PLAN, Curiosity proposes:
+- `SUBGOAL`
+- `SUCCESS_TEST`
+- `ACTION_SEQUENCE`
+- `EXPECTED`
+
+During SOLVE, Solver proposes action sequences for active subgoals.
+Sequences execute open-loop, then evaluate at boundary.
 
 ```
-    Solver.propose_subgoal_actions()
+    Curiosity/Solver.propose_subgoal_actions()
          │
          ▼
     ┌─────────────────────────────────────────────────┐
-    │  action₁ ──▶ action₂ ──▶ action₃ ──▶ action₄ │
+    │  action₁ ──▶ ... ──▶ action₂₀               │
     │                                                 │
     │  executed sequentially, no learner between steps│
     │                                                 │
     │  interrupted if:                                │
     │    • terminal state (WIN / GAME_OVER)           │
-    │    • 2+ steps with no grid changes              │
+    │    • 4+ steps with no grid changes              │
     └─────────────────────┬───────────────────────────┘
                           │
                           ▼
@@ -188,8 +205,8 @@ The `LoopAgent` is now an explore-learn-exploit harness with:
 
 - Dynamic action space from `frame.available_actions`
 - Curiosity / Learner / Solver split
-- Phase control: `EXPLORE` <-> `EXPLOIT`
-- Level control: `action` -> `subgoal` -> `plan` via `LevelController`
+- Mode control: `LEARN_ACTION` | `LEARN_SUBGOAL` | `LEARN_PLAN` | `SOLVE`
+- Diagnosis-directed routing on mismatch (no strike-based hardcoding)
 - Surprise strategies:
   - `heuristic` (default)
   - `logprob` (VLLM completions scoring pass)
@@ -198,12 +215,24 @@ The `LoopAgent` is now an explore-learn-exploit harness with:
   - event-driven (`subgoal_attempt`, `subgoal_advance`, reset/level transition)
 - Active hierarchical execution:
   - plan is parsed into ordered subgoals
-  - each active subgoal proposes a short action sequence from current state
+  - each active subgoal proposes an action sequence from current state
   - sequence is executed open-loop, then evaluated at subgoal boundary
-  - in `EXPLOIT`, both `subgoal` and `plan` levels route through subgoal-sequence execution
+  - in `SOLVE`, solver routes through plan/subgoal sequence execution
+  - in `LEARN_SUBGOAL` and `LEARN_PLAN`, curiosity uses subgoal sequences
+- Soft reset control-flow:
+  - explore subgoal attempts queue a soft `RESET`
+  - soft reset frames are metadata-only (no learner update, no surprise scoring)
+  - memory/phase/level are preserved across soft reset
 - Subgoal-boundary updates:
   - learner update, phase transition, and level-controller update happen at sequence boundaries
   - hard interrupts: terminal state or repeated no-change steps
+- Diagnosis-directed mode routing:
+  - learner expectation assessment returns `expected|unexpected` with confidence
+  - high-confidence `unexpected` routes directly to diagnosed learn level
+  - `GAME_OVER` always triggers direct diagnosis-based route to a learn level
+- Learned mode router:
+  - at boundaries without mismatch override, curiosity picks next mode:
+    `LEARN_ACTION|LEARN_SUBGOAL|LEARN_PLAN|SOLVE`
 - Structured response contract:
   - prompts allow short reasoning but require a final `ANSWER: ...` line
   - parser extracts only the final `ANSWER:` payload for execution
@@ -214,6 +243,14 @@ The `LoopAgent` is now an explore-learn-exploit harness with:
   - `strict`: clear memory
   - `carry`: keep memory
   - `noisy`: perturb memory (delete/jitter/shuffle)
+- Training-only grouped sampling package:
+  - `training/group_sampler.py`
+  - `training/rewards.py`
+  - `training/rollout_runner.py`
+  - `training/trajectory_schema.py`
+  - includes replica-prefix replay hooks for counterfactual candidate scoring
+  - includes explicit `commit_selected_candidate(...)` helper so only the selected
+    branch mutates canonical trajectory state; non-selected candidates are log-only
 
 ## Memory Model
 
@@ -228,9 +265,9 @@ Memory remains list-based, but each entry now has a stable ID:
 
 ## Key Runtime Env Vars
 
+- `MAX_ACTIONS` (default `200`)
 - `VLLM_BASE_URL`, `VLLM_MODEL`, `VLLM_API_KEY`
 - `SURPRISE_STRATEGY` = `heuristic` | `logprob`
-- `EXPLORE_BUDGET_RATIO`, `RE_EXPLORE_BUDGET`
 - `MEMORY_PERSISTENCE_MODE` = `strict` | `carry` | `noisy`
 - `NOISY_DELETE_FRACTION`, `NOISY_CONF_JITTER`
 - `STATE_KEYFRAME_INTERVAL`
@@ -238,6 +275,7 @@ Memory remains list-based, but each entry now has a stable ID:
 - `SUBGOAL_MAX_ACTIONS` (legacy fallback: `BURST_MAX_STEPS`)
 - `SUBGOAL_NO_CHANGE_LIMIT`
 - `LEARNER_UPDATE_INTERVAL`
+- `MISMATCH_CONF_THRESHOLD`
 
 ## Known Gaps / TODOs
 
@@ -245,7 +283,7 @@ Memory remains list-based, but each entry now has a stable ID:
 2. Add stronger subgoal sequence stop conditions (e.g. explicit `subgoal_done` classifier, surprise guard).
 3. Add stable-ID-aware learner prompt examples (`REMOVE M####`, `MODIFY M####`) so model natively uses IDs.
 4. Add calibration tooling for surprise scaling (for metrics/RL rewards) per game family and memory mode.
-5. Add trajectory logger schema for RL (group candidates + rewards + advantages + chosen sample).
+5. Integrate `training/` grouped-sampling utilities with full env-replica prefix replay.
 6. Implement warm/cold/noisy rollout mix for training data generation:
    - suggested starting ratio: 60/30/10.
 7. Add held-out evaluation suite for robustness:
@@ -268,11 +306,12 @@ Recommended next training approach:
 
 Passing checks:
 
+- `uv run python scripts/test_loop_v2_units.py`
 - `uv run python scripts/test_memory.py`
 - `uv run python scripts/test_state_encoder.py`
 - `uv run python scripts/test_surprise.py --strategy heuristic`
 - `uv run python scripts/test_full_loop.py`
-- `uv run ruff check agents/templates/loop_agent scripts/test_memory.py`
+- `uv run ruff check agents/templates/loop_agent training`
 
 Known repo-wide test blocker:
 

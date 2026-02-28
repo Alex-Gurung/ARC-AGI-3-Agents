@@ -42,6 +42,7 @@ ANSWER: ACTION6 x y"""
 
 SUBGOAL_SEQUENCE_PROMPT = """\
 You are solving a game and currently have an active subgoal.
+Definition: a subgoal is a short plan (up to {max_steps} actions) that should create a significant, observable state change toward level completion.
 
 PHASE: {phase}
 LEVEL: {level}
@@ -151,7 +152,7 @@ class Solver:
         state_text: str,
         memory: Memory,
         available_actions: list[str],
-        max_steps: int = 4,
+        max_steps: int = 20,
         phase: str = "EXPLOIT",
         level: str = "subgoal",
         subgoal_index: int | None = None,
@@ -183,7 +184,7 @@ class Solver:
         state_text: str,
         memory: Memory,
         available_actions: list[str],
-        max_steps: int = 4,
+        max_steps: int = 20,
     ) -> dict[str, Any]:
         return self.propose_subgoal_actions(
             state_text=state_text,
