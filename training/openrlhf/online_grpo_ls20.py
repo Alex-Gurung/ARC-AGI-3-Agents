@@ -30,11 +30,19 @@ class OpenRLHFOnlineConfig:
     runner_script: Path = Path(
         os.environ.get("OPENRLHF_RUN_SCRIPT", "training/openrlhf/run_grpo_ls20_1gpu.sh")
     )
+    agent_func_path: str = os.environ.get(
+        "AGENT_FUNC_PATH", "training/openrlhf/agent_func_loopagent_ls20.py"
+    )
     n_samples_per_prompt: int = int(os.environ.get("N_SAMPLES_PER_PROMPT", "4"))
     rollout_batch_size: int = int(os.environ.get("ROLLOUT_BATCH_SIZE", "8"))
     train_batch_size: int = int(os.environ.get("TRAIN_BATCH_SIZE", "32"))
     max_steps_per_episode: int = int(os.environ.get("MAX_STEPS_PER_EPISODE", "200"))
     vllm_gpu_util: float = float(os.environ.get("VLLM_GPU_UTIL", "0.5"))
+    memory_init_carry_p: float = float(os.environ.get("MEMORY_INIT_CARRY_P", "0.60"))
+    memory_init_noisy_p: float = float(os.environ.get("MEMORY_INIT_NOISY_P", "0.25"))
+    memory_init_blank_p: float = float(os.environ.get("MEMORY_INIT_BLANK_P", "0.15"))
+    noisy_delete_fraction: float = float(os.environ.get("NOISY_DELETE_FRACTION", "0.20"))
+    noisy_conf_jitter: float = float(os.environ.get("NOISY_CONF_JITTER", "0.10"))
 
 
 def _ensure_dataset(path: Path) -> None:
@@ -123,12 +131,18 @@ def run_online(config: OpenRLHFOnlineConfig) -> dict[str, Any]:
                 "DATASET_PATH": str(config.dataset_path),
                 "SAVE_PATH": str(save_path),
                 "CKPT_PATH": str(ckpt_path),
+                "AGENT_FUNC_PATH": config.agent_func_path,
                 "MAX_SAMPLES": str(config.max_samples_per_iter),
                 "N_SAMPLES_PER_PROMPT": str(config.n_samples_per_prompt),
                 "ROLLOUT_BATCH_SIZE": str(config.rollout_batch_size),
                 "TRAIN_BATCH_SIZE": str(config.train_batch_size),
                 "MAX_STEPS_PER_EPISODE": str(config.max_steps_per_episode),
                 "VLLM_GPU_UTIL": str(config.vllm_gpu_util),
+                "MEMORY_INIT_CARRY_P": str(config.memory_init_carry_p),
+                "MEMORY_INIT_NOISY_P": str(config.memory_init_noisy_p),
+                "MEMORY_INIT_BLANK_P": str(config.memory_init_blank_p),
+                "NOISY_DELETE_FRACTION": str(config.noisy_delete_fraction),
+                "NOISY_CONF_JITTER": str(config.noisy_conf_jitter),
             }
         )
 
@@ -198,6 +212,38 @@ def main() -> None:
             )
         ),
     )
+    parser.add_argument(
+        "--agent-func-path",
+        type=str,
+        default=os.environ.get(
+            "AGENT_FUNC_PATH", "training/openrlhf/agent_func_loopagent_ls20.py"
+        ),
+    )
+    parser.add_argument(
+        "--memory-init-carry-p",
+        type=float,
+        default=float(os.environ.get("MEMORY_INIT_CARRY_P", "0.60")),
+    )
+    parser.add_argument(
+        "--memory-init-noisy-p",
+        type=float,
+        default=float(os.environ.get("MEMORY_INIT_NOISY_P", "0.25")),
+    )
+    parser.add_argument(
+        "--memory-init-blank-p",
+        type=float,
+        default=float(os.environ.get("MEMORY_INIT_BLANK_P", "0.15")),
+    )
+    parser.add_argument(
+        "--noisy-delete-fraction",
+        type=float,
+        default=float(os.environ.get("NOISY_DELETE_FRACTION", "0.20")),
+    )
+    parser.add_argument(
+        "--noisy-conf-jitter",
+        type=float,
+        default=float(os.environ.get("NOISY_CONF_JITTER", "0.10")),
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)
@@ -208,6 +254,12 @@ def main() -> None:
         dataset_path=args.dataset_path,
         output_dir=args.output_dir,
         runner_script=args.runner_script,
+        agent_func_path=args.agent_func_path,
+        memory_init_carry_p=args.memory_init_carry_p,
+        memory_init_noisy_p=args.memory_init_noisy_p,
+        memory_init_blank_p=args.memory_init_blank_p,
+        noisy_delete_fraction=args.noisy_delete_fraction,
+        noisy_conf_jitter=args.noisy_conf_jitter,
     )
     summary = run_online(config)
     print(

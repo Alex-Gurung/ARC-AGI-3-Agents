@@ -16,6 +16,9 @@ training loops on a single GPU.
   - `bash training/openrlhf/run_online_grpo_ls20_1gpu.sh`
   - `bash scripts/run_openrlhf_online_ls20.sh`
 
+Default OpenRLHF agent function is the full LoopAgent-style staged runner:
+`training/openrlhf/agent_func_loopagent_ls20.py`.
+
 See: `training/openrlhf/README.md`
 
 ## veRL
@@ -37,3 +40,8 @@ See: `training/verl/README.md`
 - Grouped candidate branching is training-only.
 - `GRID/DIFF` is treated as ground truth.
 - `OBJECTS/RELATIONS` is heuristic/noisy.
+
+## Backend Evaluation Notes
+
+- `training/PIPELINERL_PRIME_EVAL.md`
+  - fit assessment for PipelineRL and PRIME-RL vs current OpenRLHF/veRL paths

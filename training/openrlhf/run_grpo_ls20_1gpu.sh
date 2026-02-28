@@ -13,6 +13,7 @@ set -euo pipefail
 #
 # Optional env vars:
 #   MODEL=google/gemma-3-1b-it
+#   AGENT_FUNC_PATH=training/openrlhf/agent_func_loopagent_ls20.py
 #   DATASET_PATH=training/openrlhf/data/ls20_prompts.jsonl
 #   SAVE_PATH=checkpoints/openrlhf-ls20-grpo
 #   MAX_SAMPLES=2048
@@ -21,8 +22,14 @@ set -euo pipefail
 #   TRAIN_BATCH_SIZE=32
 #   MAX_STEPS_PER_EPISODE=200
 #   VLLM_GPU_UTIL=0.45
+#   MEMORY_INIT_CARRY_P=0.60
+#   MEMORY_INIT_NOISY_P=0.25
+#   MEMORY_INIT_BLANK_P=0.15
+#   NOISY_DELETE_FRACTION=0.20
+#   NOISY_CONF_JITTER=0.10
 
 MODEL="${MODEL:-google/gemma-3-1b-it}"
+AGENT_FUNC_PATH="${AGENT_FUNC_PATH:-training/openrlhf/agent_func_loopagent_ls20.py}"
 DATASET_PATH="${DATASET_PATH:-training/openrlhf/data/ls20_prompts.jsonl}"
 SAVE_PATH="${SAVE_PATH:-checkpoints/openrlhf-ls20-grpo}"
 CKPT_PATH="${CKPT_PATH:-${SAVE_PATH}/ckpt}"
@@ -38,6 +45,11 @@ GENERATE_MAX_LEN="${GENERATE_MAX_LEN:-1024}"
 VLLM_GPU_UTIL="${VLLM_GPU_UTIL:-0.5}"
 ACTOR_LR="${ACTOR_LR:-5e-7}"
 INIT_KL_COEF="${INIT_KL_COEF:-0.00}"
+MEMORY_INIT_CARRY_P="${MEMORY_INIT_CARRY_P:-0.60}"
+MEMORY_INIT_NOISY_P="${MEMORY_INIT_NOISY_P:-0.25}"
+MEMORY_INIT_BLANK_P="${MEMORY_INIT_BLANK_P:-0.15}"
+NOISY_DELETE_FRACTION="${NOISY_DELETE_FRACTION:-0.20}"
+NOISY_CONF_JITTER="${NOISY_CONF_JITTER:-0.10}"
 
 mkdir -p "$(dirname "${DATASET_PATH}")" "${SAVE_PATH}" "${CKPT_PATH}"
 
@@ -69,8 +81,12 @@ fi
 
 echo "Launching OpenRLHF GRPO training on ls20"
 echo "MODEL=${MODEL}"
+echo "AGENT_FUNC_PATH=${AGENT_FUNC_PATH}"
 echo "DATASET_PATH=${DATASET_PATH}"
 echo "SAVE_PATH=${SAVE_PATH}"
+echo "MEMORY_INIT_CARRY_P=${MEMORY_INIT_CARRY_P}"
+echo "MEMORY_INIT_NOISY_P=${MEMORY_INIT_NOISY_P}"
+echo "MEMORY_INIT_BLANK_P=${MEMORY_INIT_BLANK_P}"
 
 # NOTE:
 # - group_norm = GRPO-style grouped advantages
@@ -83,7 +99,7 @@ uv run python -m openrlhf.cli.train_ppo_ray \
   --label_key label \
   --advantage_estimator group_norm \
   --n_samples_per_prompt "${N_SAMPLES_PER_PROMPT}" \
-  --agent_func_path training/openrlhf/agent_func_ls20.py \
+  --agent_func_path "${AGENT_FUNC_PATH}" \
   --max_steps_per_episode "${MAX_STEPS_PER_EPISODE}" \
   --actor_num_nodes 1 \
   --actor_num_gpus_per_node 1 \

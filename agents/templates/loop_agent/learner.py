@@ -20,26 +20,21 @@ logger = logging.getLogger(__name__)
 
 
 LEARNER_PROMPT = """\
-You are building a lesson book about a game by observing what happens after each action.
-Each memory entry should be an atomic, reusable lesson that helps future decisions.
-Focus on HIGH-LEVEL understanding — the most valuable lessons are:
+You are writing a rulebook that describes how a game works. Each entry is one lesson — an atomic, reusable fact that helps future decisions.
+The rulebook should be detailed enough that someone reading ONLY the rulebook could understand what the game looks like and how it behaves.
 
-- RULE: Game mechanics and constraints (e.g., "Black cells block movement", "Touching lava resets level")
-- GOAL: Hypothesis of what the level is trying to achieve (e.g., "Goal is to make the right pattern match the left template")
-- VOCAB: What colors/sprites represent (e.g., "Color 9 = player", "Color 11 = exit door")
-- PLAN/SUBGOAL: Strategic lessons (e.g., "Need key before door opens")
-- OBSERVATION: Notable environmental patterns
-- ACTION: How actions change state (e.g., "ACTION1 moves player up 1 cell unless blocked"). Do not re-add actions already in memory.
+You may optionally prefix entries with a category tag like [ACTION], [RULE], [GOAL], etc. for organization, but this is not required.
+Valuable lessons include: what actions do, game mechanics/constraints, what colors/sprites represent, goal hypotheses, strategic insights, notable patterns.
+If ACTION is one of MISSING_ACTION_LESSONS, prioritize documenting what that action does.
 
-IMPORTANT: Check MEMORY below before adding anything. If a similar entry exists, use MODIFY to refine it or output NONE. Do NOT add duplicates. Actively REMOVE outdated, wrong, or redundant entries to keep memory clean.
-CRITICAL EVIDENCE RULE:
+IMPORTANT: Check the RULEBOOK below before adding anything. If a similar entry already exists, use MODIFY to refine it or output NONE. Do NOT add duplicates. Actively REMOVE outdated, wrong, or redundant entries to keep the rulebook clean.
+EVIDENCE RULE:
 - Only add/modify lessons when there is direct evidence in BEFORE/AFTER/DIFF.
 - If evidence is weak or ambiguous, output NONE.
 - Every lesson must include explicit evidence in the justification after "|".
   Write what changed and why that supports the claim.
   Good evidence phrases: "DIFF shows ...", "BEFORE/AFTER changed ...", "observed in N attempts".
 DESCRIPTIVE DETAIL:
-- Each entry should be detailed enough that someone reading ONLY the memory could reconstruct what the game looks like and how it behaves.
 - In the content, describe the visual/spatial effect: mention colors, positions, directions, and what the grid looks like after the change.
 - In the justification, describe what you actually saw change: which cells moved, what colors appeared/disappeared, spatial relationships that shifted.
 - Aim for ~20-30 words per side of the "|". Terse entries like "ACTION1 moves player up" are too vague — prefer "ACTION1 shifts the blue object (color 3) upward by 1 row, leaving its previous cell empty (black/0)".
@@ -49,17 +44,10 @@ Low confidence is encouraged — write early hypotheses at 0.3 or 0.4 and MODIFY
 - 0.50-0.75: moderate evidence (repeated consistent observations).
 - 0.75-0.90: strong evidence, but still potentially falsifiable.
 - 0.90-1.00: only for directly verified outcomes (e.g., clear WIN/level-complete condition) or many repeated confirmations.
-HYPOTHESIS POLICY:
-- For uncertain GOAL/PLAN/SUBGOAL lessons, prefix content with "Hypothesis:".
-- Do not write high-confidence GOAL/PLAN claims unless completion condition was actually observed.
-When useful, explicitly write lesson hypotheses at multiple abstraction levels:
-- action lesson: what a specific action does to state
-- subgoal lesson: what attempting/completing a subgoal changes
-- plan lesson: when a strategy works or fails
-- goal lesson: what condition seems to define level completion
+For uncertain goal/plan lessons, prefix content with "Hypothesis:".
 
 REFERENCE RULES:
-- For MODIFY/REMOVE, ONLY use numeric indices shown in MEMORY, in brackets.
+- For MODIFY/REMOVE, ONLY use numeric indices shown in RULEBOOK, in brackets.
 - Allowed reference form is exactly: [n]  (examples: [0], [5], [12]).
 - If no valid index exists, do not guess; output NONE.
 
@@ -85,23 +73,22 @@ If images are attached, they are ordered as:
 RECENT_ACTIONS:
 {action_history}
 
-MEMORY:
 {memory_text}
 
-Compare PREDICTION with AFTER/DIFF. Did the outcome match? Did this reveal something new, confirm a belief, or contradict something in memory?
-If ACTION is one of MISSING_ACTION_LESSONS, prioritize adding/updating an ACTION lesson for it with evidence.
+Compare PREDICTION with AFTER/DIFF. Did the outcome match? Did this reveal something new, confirm a belief, or contradict something in the rulebook?
 
 You may output MULTIPLE operations (one per line). Formats:
-ADD [TYPE] detailed lesson with visual/spatial description (~20-30 words) | specific evidence describing what changed on the grid (~20-30 words) (confidence 0-1)
-MODIFY [n] corrected belief with visual detail | specific evidence for the correction (confidence 0-1)
+ADD detailed lesson (~20-30 words) | specific evidence (~20-30 words) (confidence 0-1)
+ADD [TAG] detailed lesson (~20-30 words) | specific evidence (~20-30 words) (confidence 0-1)
+MODIFY [n] corrected lesson | specific evidence for the correction (confidence 0-1)
 REMOVE [n] | why this entry is wrong or redundant
 NONE
 
 Examples from another game (notice the descriptive detail — each entry paints a picture of what the grid looks like):
-- ADD [ACTION] ACTION1 shifts the blue square (color 3) upward by 1 row, leaving its old cell empty (black/0); blocked if a dark wall (color 5) is directly above | DIFF shows the blue cell at row 6 col 2 disappeared and reappeared at row 5 col 2 in 2 consecutive attempts; dark cell at row 4 col 2 prevented further upward movement (0.65)
-- ADD [RULE] Dark grey cells (color 5) forming the border walls are impassable — movement actions have no effect when the player is adjacent to them in the movement direction | BEFORE/AFTER grids were identical across 3 attempts where blue object tried to move into color-5 cells at the grid boundary (0.7)
+- ADD ACTION1 shifts the blue square (color 3) upward by 1 row, leaving its old cell empty (black/0); blocked if a dark wall (color 5) is directly above | DIFF shows the blue cell at row 6 col 2 disappeared and reappeared at row 5 col 2 in 2 consecutive attempts; dark cell at row 4 col 2 prevented further upward movement (0.65)
+- ADD Dark grey cells (color 5) forming the border walls are impassable — movement actions have no effect when the player is adjacent to them in the movement direction | BEFORE/AFTER grids were identical across 3 attempts where blue object tried to move into color-5 cells at the grid boundary (0.7)
 - ADD [VOCAB] Color 9 (bright red) is the player-controlled object — a single cell that responds to movement actions; color 5 (dark grey) forms static walls; color 0 (black) is empty traversable space | the red cell is the only region that changes position after actions while all other colored regions remain fixed across 4 observations (0.6)
-- ADD [GOAL] Hypothesis: level completes when the red player (color 9) reaches the green cell (color 4) on the right border — possibly a target or exit | one attempt ended immediately after the red cell moved adjacent to the green cell, but needs more confirmation (0.4)
+- ADD Hypothesis: level completes when the red player (color 9) reaches the green cell (color 4) on the right border — possibly a target or exit | one attempt ended immediately after the red cell moved adjacent to the green cell, but needs more confirmation (0.4)
 - MODIFY [3] ACTION1 shifts blue object up by 1 row in open space, but is blocked when a dark wall (color 5) or grid edge is directly above — not a universal upward move | DIFF showed zero cell changes when blue object was at row 1 (top edge) and again when color-5 wall was directly above (0.6)
 - REMOVE [5] | contradicted: latest BEFORE/AFTER shows the object passed through what we thought was a wall, so the blocking rule was wrong
 - NONE
@@ -117,7 +104,7 @@ Something unexpected happened while trying to solve the game.
 EXPECTED: {expected}
 ACTUAL: {actual}
 
-MEMORY:
+RULEBOOK:
 {memory_text}
 
 Which level of our understanding was wrong?
@@ -138,10 +125,10 @@ SUBGOAL_INDEX: {subgoal_index}
 EXPECTED: {expected}
 ACTUAL: {actual}
 
-MEMORY:
+RULEBOOK:
 {memory_text}
 
-Decide if ACTUAL matched EXPECTED from memory.
+Decide if ACTUAL matched EXPECTED from the rulebook.
 
 Output exactly one final line:
 ANSWER: verdict=<expected|unexpected> conf=<0.00-1.00> level=<action|subgoal|plan> ref=<index|none>
@@ -196,7 +183,7 @@ BEFORE:
 ACTION:
 {action_taken}
 
-MEMORY:
+RULEBOOK:
 {memory_text}
 
 OBSERVED_OUTCOME:
@@ -209,6 +196,27 @@ DIFF:
 Think step by step, then output exactly one final line:
 ANSWER: SURPRISE_X10=<0-10>
 """
+
+
+CONSOLIDATION_PROMPT = """\
+You are reviewing and consolidating a game rulebook. Your goal is to make it concise, non-redundant, and accurate.
+
+{memory_text}
+
+Review the rulebook above. Output operations to clean it up:
+- REMOVE [n] | reason — delete redundant or contradicted entries
+- MODIFY [n] merged/improved text | reason (confidence) — improve an entry by merging near-duplicates or fixing wording
+- NONE — if the rulebook is already clean
+
+Focus on:
+1. Merge near-duplicate entries — if two entries say essentially the same thing, keep the better-worded one and REMOVE the other
+2. Remove entries that are contradicted by higher-confidence entries
+3. Improve clarity of poorly-worded entries
+
+Do NOT add new entries. Only clean up existing ones.
+Think step by step, then output ONLY operations (no rationale/prose labels).
+ANSWER:
+<operations, one per line>"""
 
 
 class Learner:
@@ -448,6 +456,52 @@ class Learner:
         self.last_raw_output = raw_output
         self.last_answer_output = answer_output
         return self._parse_self_rated_surprise(answer_output)
+
+    def consolidate(self, memory: Memory, current_step: int) -> int:
+        """Review and consolidate the rulebook to remove duplicates and improve clarity.
+
+        Returns number of operations applied.
+        """
+        if not memory or len(memory) < 2:
+            return 0
+
+        memory_text = memory.to_text()
+        prompt = CONSOLIDATION_PROMPT.format(memory_text=memory_text)
+        raw_output = self._call_llm(prompt, max_tokens=1024, temperature=0.7)
+        answer_output = self._extract_answer(raw_output)
+        self.last_raw_output = raw_output
+        self.last_answer_output = answer_output
+
+        operation_lines = self._extract_operation_lines(answer_output)
+        ops_applied = 0
+        # Process REMOVEs in reverse index order to avoid index shifting
+        operations = []
+        for line in operation_lines:
+            if line.upper() == "NONE":
+                continue
+            operation = parse_memory_operation(line, current_step)
+            operations.append(operation)
+
+        # Sort removes by index descending so removals don't shift later indices
+        removes = [op for op in operations if op.get("op") == "remove"]
+        modifies = [op for op in operations if op.get("op") == "modify"]
+
+        # Apply removes in reverse order
+        removes.sort(key=lambda op: int(op.get("index", 0) or 0), reverse=True)
+        for op in removes:
+            if apply_memory_operation(memory, op, current_step):
+                ops_applied += 1
+
+        for op in modifies:
+            if apply_memory_operation(memory, op, current_step):
+                ops_applied += 1
+
+        if ops_applied:
+            logger.info(f"Consolidation applied {ops_applied} operations (step {current_step})")
+        else:
+            logger.debug(f"Consolidation: no changes needed (step {current_step})")
+
+        return ops_applied
 
     def _call_llm(
         self,

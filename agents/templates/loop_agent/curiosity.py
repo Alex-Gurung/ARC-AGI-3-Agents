@@ -45,7 +45,6 @@ Treat OBJECTS/RELATIONS as helpful but possibly noisy heuristics.
 RECENT_ACTIONS:
 {action_history}
 
-MEMORY:
 {memory_text}
 
 UNSURE (low confidence entries):
@@ -86,7 +85,6 @@ Treat OBJECTS/RELATIONS as helpful but possibly noisy heuristics.
 RECENT_ACTIONS:
 {action_history}
 
-MEMORY:
 {memory_text}
 
 UNSURE (low confidence entries):
@@ -115,7 +113,6 @@ SEMANTIC_DISCOVERY_STATUS: {semantic_discovery_status}
 RECENT_ACTIONS:
 {action_history}
 
-MEMORY:
 {memory_text}
 
 Propose a strategy to test as ordered subgoals (max 5).
@@ -154,7 +151,6 @@ SEMANTIC_DISCOVERY_STATUS: {semantic_discovery_status}
 RECENT_ACTIONS:
 {action_history}
 
-MEMORY:
 {memory_text}
 
 Examples of good reasoning (pick exactly one mode):
@@ -187,7 +183,6 @@ Treat OBJECTS/RELATIONS as helpful but possibly noisy heuristics.
 RECENT_ACTIONS:
 {action_history}
 
-MEMORY:
 {memory_text}
 
 ACTIVE_SUBGOAL: {active_subgoal}

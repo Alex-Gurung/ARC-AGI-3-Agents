@@ -27,10 +27,7 @@ from .runtime import LoopRuntime
 from .solver import Solver
 from .state_encoder import StateEncoder
 from .surprise import (
-    HeuristicSurprise,
     LevelController,
-    LogProbSurprise,
-    SurpriseStrategy,
 )
 
 logger = logging.getLogger(__name__)
@@ -65,7 +62,7 @@ class LoopAgent(Agent):
     VLLM_API_KEY: str = os.environ.get("VLLM_API_KEY", "dummy")
 
     # Strategy switches
-    SURPRISE_STRATEGY: str = os.environ.get("SURPRISE_STRATEGY", "heuristic")
+    # Surprise is now self-rated by the learner LLM (no heuristic strategy).
     MEMORY_PERSISTENCE_MODE: str = os.environ.get(
         "MEMORY_PERSISTENCE_MODE", "strict"
     ).lower()  # strict | carry | noisy
@@ -85,14 +82,12 @@ class LoopAgent(Agent):
     CURIOSITY_NUM_SAMPLES: int = int(os.environ.get("CURIOSITY_NUM_SAMPLES", "4"))
     LEARNER_NUM_SAMPLES: int = int(os.environ.get("LEARNER_NUM_SAMPLES", "4"))
     MISMATCH_CONF_THRESHOLD: float = float(os.environ.get("MISMATCH_CONF_THRESHOLD", "0.7"))
-    STUCK_REPEAT_STATE_LIMIT: int = int(os.environ.get("STUCK_REPEAT_STATE_LIMIT", "8"))
-    MODE_MIN_BOUNDARIES_ACTION: int = int(os.environ.get("MODE_MIN_BOUNDARIES_ACTION", "6"))
-    MODE_MIN_BOUNDARIES_SUBGOAL: int = int(os.environ.get("MODE_MIN_BOUNDARIES_SUBGOAL", "3"))
-    MODE_MIN_BOUNDARIES_PLAN: int = int(os.environ.get("MODE_MIN_BOUNDARIES_PLAN", "2"))
     MODE_SWITCH_COOLDOWN_BOUNDARIES: int = int(
         os.environ.get("MODE_SWITCH_COOLDOWN_BOUNDARIES", "2")
     )
-    SOLVE_MIN_LESSON_CONF: float = float(os.environ.get("SOLVE_MIN_LESSON_CONF", "0.6"))
+    MEMORY_CONSOLIDATION_INTERVAL: int = int(
+        os.environ.get("MEMORY_CONSOLIDATION_INTERVAL", "5")
+    )
 
     # Noisy-memory mode controls
     NOISY_DELETE_FRACTION: float = float(os.environ.get("NOISY_DELETE_FRACTION", "0.2"))
@@ -119,15 +114,6 @@ class LoopAgent(Agent):
             window_size=5,
         )
         self.runtime = LoopRuntime(self)
-
-        # Surprise strategy
-        if self.SURPRISE_STRATEGY == "logprob":
-            self.surprise: SurpriseStrategy = LogProbSurprise(
-                client=self.client,
-                model=self.VLLM_MODEL,
-            )
-        else:
-            self.surprise = HeuristicSurprise()
 
         # Decision-state management
         self.phase = Phase.EXPLORE  # Backward-compatible label for prompt plumbing.
@@ -173,6 +159,7 @@ class LoopAgent(Agent):
         }
         self._mode_switch_cooldown_remaining: int = 0
         self._action_history: list[dict[str, Any]] = []
+        self._learner_steps_since_consolidation: int = 0
 
     @trace_agent_session
     def main(self) -> None:
@@ -250,29 +237,6 @@ class LoopAgent(Agent):
 
         if latest_frame.levels_completed > self._levels_completed_at_reset:
             self._on_level_complete(latest_frame)
-
-        if self._repeat_state_streak >= self.STUCK_REPEAT_STATE_LIMIT:
-            logger.info(
-                "Repeat-state escape triggered (streak=%d >= %d): forcing LEARN_ACTION",
-                self._repeat_state_streak,
-                self.STUCK_REPEAT_STATE_LIMIT,
-            )
-            self._action_history.append({
-                "step": self.action_counter,
-                "action": "STUCK",
-                "changed": 0,
-                "event": "STUCK_RESET",
-            })
-            if len(self._action_history) > self.ACTION_HISTORY_MAX:
-                self._action_history.pop(0)
-            self._set_mode(
-                DecisionMode.LEARN_ACTION,
-                reason="repeat-state escape",
-            )
-            self._reset_plan_state()
-            self._reset_subgoal_sequence_state(clear_pending=True)
-            self.state_encoder.force_keyframe_next("repeat_state_escape")
-            self._repeat_state_streak = 0
 
         # Execute pre-planned subgoal actions first.
         if self._pending_subgoal_actions:
@@ -628,16 +592,24 @@ class LoopAgent(Agent):
                     rulebook_status=rulebook_after,
                     missing_action_lessons=missing_after_text,
                 )
+                self._learner_steps_since_consolidation += 1
             else:
                 logger.debug("Skipping learner update on this step")
 
-            surprise_score = self.surprise.compute(
+            self._maybe_consolidate_memory()
+
+            surprise_x10 = self.learner.self_rate_surprise(
                 state_before=state_before,
-                action=action.name,
+                action_taken=action.name,
                 state_after=state_after,
+                diff_text=diff_text,
                 memory=self.memory,
-                num_changed_cells=num_changed,
+                mode=self.current_mode.value,
+                image_before_url=state_before_image,
+                image_after_url=state_after_image,
+                image_diff_url=transition_image,
             )
+            surprise_score = surprise_x10 / 10.0  # normalize to [0, 1]
             level = self._mode_to_level(self.current_mode)
             self._record_surprise(level, surprise_score)
             self._route_mode_after_boundary(
@@ -732,7 +704,6 @@ class LoopAgent(Agent):
         action_taken = f"SUBGOAL_SEQ[{', '.join(action_trace)}]"
 
         diff_text = self.state_encoder.get_diff_text(start_grid, grid_after)
-        total_changed = self.state_encoder.get_num_changed_cells(start_grid, grid_after)
         start_image = self._grid_image_data_url(start_grid)
         end_image = self._grid_image_data_url(grid_after)
         transition_image = self._transition_image_data_url(start_grid, grid_after)
@@ -771,14 +742,21 @@ class LoopAgent(Agent):
             rulebook_status=rulebook_after,
             missing_action_lessons=missing_after_text,
         )
+        self._learner_steps_since_consolidation += 1
+        self._maybe_consolidate_memory()
 
-        surprise_score = self.surprise.compute(
+        surprise_x10 = self.learner.self_rate_surprise(
             state_before=start_state,
-            action=action_taken,
+            action_taken=action_taken,
             state_after=state_after,
+            diff_text=diff_text,
             memory=self.memory,
-            num_changed_cells=total_changed,
+            mode=self.current_mode.value,
+            image_before_url=start_image,
+            image_after_url=end_image,
+            image_diff_url=transition_image,
         )
+        surprise_score = surprise_x10 / 10.0
         self._record_surprise(self._subgoal_sequence_level, surprise_score)
 
         if self._subgoal_sequence_is_explore:
@@ -1358,18 +1336,6 @@ class LoopAgent(Agent):
         if action_base.startswith("ACTION") and action_base in missing_before and action_base not in missing_after:
             score += 4.0
 
-        completion_observed = ("STATE: WIN" in state_after.upper()) or ("LEVELS_COMPLETED:" in state_after.upper())
-        for line in answer_text.splitlines():
-            normalized = line.strip()
-            if not normalized:
-                continue
-            high_conf_match = re.search(r"\((?:conf(?:idence)?\s*:\s*)?([01](?:\.\d+)?)\)\s*$", normalized, re.IGNORECASE)
-            confidence = float(high_conf_match.group(1)) if high_conf_match else 0.0
-            if re.match(r"^(ADD|MODIFY)\s+\[(GOAL|PLAN)\]\b", normalized, re.IGNORECASE):
-                if confidence >= 0.8 and not completion_observed:
-                    score -= 3.0
-                if "HYPOTHESIS:" in normalized.upper():
-                    score += 0.5
         return score
 
     @staticmethod
@@ -1381,31 +1347,6 @@ class LoopAgent(Agent):
         if "no changes" in diff_text.lower():
             return 0
         return 1
-
-    def _compute_surprise_without_side_effects(
-        self,
-        *,
-        state_before: str,
-        action: str,
-        state_after: str,
-        memory: Memory,
-        num_changed_cells: int,
-    ) -> float:
-        """Compute surprise while restoring surprise history afterward."""
-        history_obj = getattr(self.surprise, "history", None)
-        saved_history = list(history_obj) if history_obj is not None else None
-        try:
-            return self.surprise.compute(
-                state_before=state_before,
-                action=action,
-                state_after=state_after,
-                memory=memory,
-                num_changed_cells=num_changed_cells,
-            )
-        finally:
-            if history_obj is not None and saved_history is not None:
-                history_obj.clear()
-                history_obj.extend(saved_history)
 
     def _learner_update_best_of_n(
         self,
@@ -1451,7 +1392,6 @@ class LoopAgent(Agent):
         original_nones = self.learner.consecutive_nones
         available_actions = self._extract_available_actions_from_text(state_after)
         before_snapshot = self._clone_memory(memory)
-        num_changed_cells = self._estimate_changed_cells(diff_text)
         candidates: list[dict[str, Any]] = []
 
         for _ in range(n):
@@ -1484,13 +1424,9 @@ class LoopAgent(Agent):
                 state_after=state_after,
                 available_actions=available_actions,
             )
-            surprise_score = self._compute_surprise_without_side_effects(
-                state_before=state_before,
-                action=action_taken,
-                state_after=state_after,
-                memory=candidate_memory,
-                num_changed_cells=num_changed_cells,
-            )
+            # Surprise scoring deferred to real self-rated call after
+            # candidate selection; no per-candidate LLM calls.
+            surprise_score = 0.0
             candidates.append(
                 {
                     "memory": candidate_memory,
@@ -1554,6 +1490,16 @@ class LoopAgent(Agent):
             "ACTION6",
             "ACTION7",
         ]
+
+    def _maybe_consolidate_memory(self) -> None:
+        """Run periodic memory consolidation if interval is reached."""
+        if self.MEMORY_CONSOLIDATION_INTERVAL <= 0:
+            return
+        if self._learner_steps_since_consolidation >= self.MEMORY_CONSOLIDATION_INTERVAL:
+            self._learner_steps_since_consolidation = 0
+            ops = self.learner.consolidate(self.memory, self.action_counter)
+            if ops:
+                logger.info("Memory consolidation applied %d operations", ops)
 
     def _record_surprise(self, level: str, surprise: float) -> None:
         level_key = level if level in self.level_controller.surprise_history else "action"
@@ -1626,63 +1572,8 @@ class LoopAgent(Agent):
         self._set_mode(target_mode, reason="mode router decision")
 
     def _gate_router_mode(self, proposed_mode: DecisionMode) -> DecisionMode:
-        """Apply lightweight evidence gates before accepting router mode transitions."""
-        current = self.current_mode
-        if proposed_mode == current:
-            return current
-
-        # Force stepwise upward progression for router choices.
-        stepwise_up = {
-            DecisionMode.LEARN_ACTION: DecisionMode.LEARN_SUBGOAL,
-            DecisionMode.LEARN_SUBGOAL: DecisionMode.LEARN_PLAN,
-            DecisionMode.LEARN_PLAN: DecisionMode.SOLVE,
-            DecisionMode.SOLVE: DecisionMode.SOLVE,
-        }
-        if current != DecisionMode.SOLVE and proposed_mode == DecisionMode.SOLVE and current != DecisionMode.LEARN_PLAN:
-            proposed_mode = stepwise_up[current]
-        if current == DecisionMode.LEARN_ACTION and proposed_mode == DecisionMode.LEARN_PLAN:
-            proposed_mode = DecisionMode.LEARN_SUBGOAL
-        if current == DecisionMode.LEARN_SUBGOAL and proposed_mode == DecisionMode.SOLVE:
-            proposed_mode = DecisionMode.LEARN_PLAN
-
-        boundaries_here = self._mode_boundary_counts.get(current.value, 0)
-        min_required = {
-            DecisionMode.LEARN_ACTION: self.MODE_MIN_BOUNDARIES_ACTION,
-            DecisionMode.LEARN_SUBGOAL: self.MODE_MIN_BOUNDARIES_SUBGOAL,
-            DecisionMode.LEARN_PLAN: self.MODE_MIN_BOUNDARIES_PLAN,
-            DecisionMode.SOLVE: 0,
-        }[current]
-        moving_up = (
-            current == DecisionMode.LEARN_ACTION and proposed_mode in (DecisionMode.LEARN_SUBGOAL, DecisionMode.LEARN_PLAN, DecisionMode.SOLVE)
-        ) or (
-            current == DecisionMode.LEARN_SUBGOAL and proposed_mode in (DecisionMode.LEARN_PLAN, DecisionMode.SOLVE)
-        ) or (
-            current == DecisionMode.LEARN_PLAN and proposed_mode == DecisionMode.SOLVE
-        )
-        if moving_up and boundaries_here < min_required:
-            logger.debug(
-                "Router mode gated: %s -> %s requires >= %d boundaries, have %d",
-                current.value,
-                proposed_mode.value,
-                min_required,
-                boundaries_here,
-            )
-            return current
-
-        if proposed_mode == DecisionMode.SOLVE and not self._has_solve_ready_lessons():
-            logger.debug("Router mode gated: SOLVE blocked (insufficient GOAL/PLAN lesson confidence)")
-            return current
-
+        """Pass through the router's mode decision without heuristic gates."""
         return proposed_mode
-
-    def _has_solve_ready_lessons(self) -> bool:
-        """Return True when memory has at least one credible GOAL/PLAN lesson."""
-        if not self.memory or not self.memory.entries:
-            return False
-        for entry in self.memory.entries:
-            if entry.type in {"GOAL", "PLAN"} and entry.confidence >= self.SOLVE_MIN_LESSON_CONF:
-                return True
-        return False
 
     def _run_mode_diagnosis(
         self,
@@ -1900,19 +1791,11 @@ class LoopAgent(Agent):
         object_ids = sorted(set(re.findall(r"\bO\d+\b", state_text)))
         relation_match = re.search(r"RELATIONS\s*\((\d+)\)", state_text)
         relations_count = int(relation_match.group(1)) if relation_match else 0
-        vocab_entries = len(self.memory.get_by_type("VOCAB"))
-        rule_entries = len(self.memory.get_by_type("RULE"))
-        subgoal_entries = len(self.memory.get_by_type("SUBGOAL"))
-        goal_entries = len(self.memory.get_by_type("GOAL"))
-        unresolved_objects = max(0, len(object_ids) - vocab_entries)
+        total_lessons = len(self.memory) if self.memory else 0
         return (
+            f"total_lessons={total_lessons} "
             f"objects_in_view={len(object_ids)} "
-            f"relations_in_view={relations_count} "
-            f"vocab_lessons={vocab_entries} "
-            f"rule_lessons={rule_entries} "
-            f"subgoal_lessons={subgoal_entries} "
-            f"goal_lessons={goal_entries} "
-            f"unresolved_objects~{unresolved_objects}"
+            f"relations_in_view={relations_count}"
         )
 
     def _early_exploration_hint(

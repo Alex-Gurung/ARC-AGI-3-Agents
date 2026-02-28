@@ -1,8 +1,10 @@
 """Memory data structure for the LoopAgent.
 
-Bounded list of typed entries with ADD/REMOVE/MODIFY operations,
+Bounded list of entries with ADD/REMOVE/MODIFY operations,
 confidence tracking, and justifications. Max 50 entries with
 lowest-confidence eviction when full.
+
+Types are optional cosmetic tags for organization — no logic branches on them.
 """
 
 import logging
@@ -18,18 +20,19 @@ logger = logging.getLogger(__name__)
 class MemoryEntry:
     """A single entry in the agent's memory."""
 
-    type: str
-    content: str  # what we believe
-    justification: str  # why we believe it
-    confidence: float  # 0-1
-    created_step: int
-    last_modified_step: int
+    type: str = ""  # optional cosmetic tag (e.g. "ACTION", "RULE")
+    content: str = ""  # what we believe
+    justification: str = ""  # why we believe it
+    confidence: float = 0.5  # 0-1
+    created_step: int = 0
+    last_modified_step: int = 0
     memory_id: str = field(default="")
 
     def to_text(self) -> str:
         """Serialize to single-line text for LLM context."""
+        prefix = f"[{self.type}] " if self.type else ""
         return (
-            f"[{self.type}] {self.content} | "
+            f"{prefix}{self.content} | "
             f"{self.justification} (conf: {self.confidence:.2f})"
         )
 
@@ -68,12 +71,11 @@ class Memory:
 
         return None
 
-    def add(self, entry: MemoryEntry, dedup_threshold: float = 0.7) -> int:
+    def add(self, entry: MemoryEntry, dedup_threshold: float = 0.5) -> int:
         """Add a new entry. Returns index. Evicts lowest-confidence if full.
 
-        If an existing entry of the same type has high word overlap
-        (Jaccard >= dedup_threshold), boosts its confidence instead of
-        adding a duplicate.
+        If an existing entry has high word overlap (Jaccard >= dedup_threshold),
+        boosts its confidence instead of adding a duplicate.
         """
         if dedup_threshold > 0:
             similar_idx = self._find_similar(entry, threshold=dedup_threshold)
@@ -96,15 +98,13 @@ class Memory:
         logger.debug(f"Memory ADD [{idx}]: {entry.to_text()}")
         return idx
 
-    def _find_similar(self, entry: MemoryEntry, threshold: float = 0.7) -> Optional[int]:
-        """Find an existing entry with similar content (same type, high word overlap)."""
+    def _find_similar(self, entry: MemoryEntry, threshold: float = 0.5) -> Optional[int]:
+        """Find an existing entry with similar content (high word overlap)."""
         new_words = set(entry.content.lower().split())
         if not new_words:
             return None
 
         for i, existing in enumerate(self.entries):
-            if existing.type != entry.type:
-                continue
             existing_words = set(existing.content.lower().split())
             if not existing_words:
                 continue
@@ -192,12 +192,10 @@ class Memory:
         return [(i, e) for i, e in enumerate(self.entries) if e.confidence < threshold]
 
     def known_action_lessons(self) -> set[str]:
-        """Return action names explicitly covered by ACTION lessons."""
+        """Return action names mentioned in any entry's content."""
         known: set[str] = set()
         pattern = re.compile(r"\b(RESET|ACTION[1-7])\b", flags=re.IGNORECASE)
         for entry in self.entries:
-            if entry.type != "ACTION":
-                continue
             for match in pattern.findall(entry.content):
                 known.add(match.upper())
         return known
@@ -215,8 +213,8 @@ class Memory:
     def to_text(self) -> str:
         """Serialize full memory for LLM context."""
         if not self.entries:
-            return "MEMORY (0/50 entries): empty"
-        lines = [f"MEMORY ({len(self.entries)}/{self.MAX_ENTRIES} entries):"]
+            return "RULEBOOK (0/50 entries): empty"
+        lines = [f"RULEBOOK ({len(self.entries)}/{self.MAX_ENTRIES} entries):"]
         for i, entry in enumerate(self.entries):
             lines.append(f"[{i}] {entry.to_text()}")
         return "\n".join(lines)
@@ -273,11 +271,31 @@ class Memory:
         return len(self.entries) > 0
 
 
+def _strip_type_prefix(content: str) -> tuple[str, str]:
+    """Strip a leading [TYPE] tag from content if present.
+
+    Returns (type_tag, cleaned_content). type_tag is "" if no tag found.
+    Handles doubled tags like '[RULE] [RULE] content' → ('RULE', 'content').
+    """
+    cleaned = content.strip()
+    tag = ""
+    # Strip up to 2 leading [TYPE] prefixes (handles doubling)
+    for _ in range(2):
+        m = re.match(r"\[(\w+(?:/\w+)?)\]\s*", cleaned)
+        if m:
+            tag = m.group(1).upper().split("/")[0]
+            cleaned = cleaned[m.end():]
+        else:
+            break
+    return tag, cleaned.strip()
+
+
 def parse_memory_operation(text: str, current_step: int) -> dict:
     """Parse LLM output into a memory operation.
 
-    Expected formats (brackets and confidence are optional):
+    Expected formats (type tag and confidence are optional):
         ADD [TYPE] content | justification (confidence)
+        ADD content | justification (confidence)
         MODIFY index content | justification (confidence)
         REMOVE index | reason
         NONE
@@ -291,25 +309,29 @@ def parse_memory_operation(text: str, current_step: int) -> dict:
     if text.upper() == "NONE" or not text:
         return {"op": "none"}
 
-    # Try ADD — brackets optional around type, confidence optional
-    # Type may contain / (e.g. "PLAN/SUBGOAL"); we take the first part.
+    # Try ADD — optional [TYPE] tag, optional | separator, optional confidence
+    # Pattern: ADD [optional type] content | justification (confidence)
     add_match = re.match(
-        r"ADD\s+\[?([\w/]+)\]?\s+(.+?)\s*\|\s*(.+?)\s*"
+        r"ADD\s+(?:\[?([\w/]+)\]?\s+)?(.+?)\s*\|\s*(.+?)\s*"
         r"(?:\(\s*(?:conf(?:idence)?\s*:\s*)?(\d*\.?\d+)\s*\))?\s*$",
         text,
         re.IGNORECASE,
     )
     if not add_match:
-        # Fallback: ADD without | separator — treat entire content as both
+        # Fallback: ADD without | separator
         add_match = re.match(
-            r"ADD\s+\[?([\w/]+)\]?\s+(.+?)\s*"
+            r"ADD\s+(?:\[?([\w/]+)\]?\s+)?(.+?)\s*"
             r"(?:\(\s*(?:conf(?:idence)?\s*:\s*)?(\d*\.?\d+)\s*\))?\s*$",
             text,
             re.IGNORECASE,
         )
         if add_match:
-            raw_type = add_match.group(1).upper().split("/")[0]
+            raw_type = (add_match.group(1) or "").upper().split("/")[0]
             content = add_match.group(2).strip()
+            # Strip doubled type prefix from content
+            content_tag, content = _strip_type_prefix(content)
+            if not raw_type and content_tag:
+                raw_type = content_tag
             confidence = float(add_match.group(3)) if add_match.group(3) else 0.5
             confidence = max(0.0, min(1.0, confidence))
             return {
@@ -324,15 +346,21 @@ def parse_memory_operation(text: str, current_step: int) -> dict:
                 ),
             }
     if add_match and add_match.lastindex and add_match.lastindex >= 3:
-        raw_type = add_match.group(1).upper().split("/")[0]
+        raw_type = (add_match.group(1) or "").upper().split("/")[0]
+        content = add_match.group(2).strip()
+        justification = add_match.group(3).strip()
+        # Strip doubled type prefix from content
+        content_tag, content = _strip_type_prefix(content)
+        if not raw_type and content_tag:
+            raw_type = content_tag
         confidence = float(add_match.group(4)) if add_match.group(4) else 0.5
         confidence = max(0.0, min(1.0, confidence))
         return {
             "op": "add",
             "entry": MemoryEntry(
                 type=raw_type,
-                content=add_match.group(2).strip(),
-                justification=add_match.group(3).strip(),
+                content=content,
+                justification=justification,
                 confidence=confidence,
                 created_step=current_step,
                 last_modified_step=current_step,
@@ -359,11 +387,13 @@ def parse_memory_operation(text: str, current_step: int) -> dict:
             confidence = max(0.0, min(1.0, confidence))
             ref = modify_match.group(1)
             index = int(ref) if ref.isdigit() else None
+            content = modify_match.group(2).strip()
+            _tag, content = _strip_type_prefix(content)
             return {
                 "op": "modify",
                 "ref": ref,
                 "index": index,
-                "content": modify_match.group(2).strip(),
+                "content": content,
                 "justification": "(no justification provided)",
                 "confidence": confidence,
             }
@@ -372,12 +402,15 @@ def parse_memory_operation(text: str, current_step: int) -> dict:
         confidence = max(0.0, min(1.0, confidence))
         ref = modify_match.group(1)
         index = int(ref) if ref.isdigit() else None
+        content = modify_match.group(2).strip()
+        justification = modify_match.group(3).strip()
+        _tag, content = _strip_type_prefix(content)
         return {
             "op": "modify",
             "ref": ref,
             "index": index,
-            "content": modify_match.group(2).strip(),
-            "justification": modify_match.group(3).strip(),
+            "content": content,
+            "justification": justification,
             "confidence": confidence,
         }
 

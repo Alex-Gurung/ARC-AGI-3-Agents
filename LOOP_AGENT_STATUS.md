@@ -261,6 +261,7 @@ The `LoopAgent` is now an explore-learn-exploit harness with:
   - includes explicit `commit_selected_candidate(...)` helper so only the selected
     branch mutates canonical trajectory state; non-selected candidates are log-only
 - OpenRLHF scaffold for single-game RL:
+  - `training/openrlhf/agent_func_loopagent_ls20.py`
   - `training/openrlhf/agent_func_ls20.py`
   - `training/openrlhf/make_ls20_dataset.py`
   - `training/openrlhf/run_grpo_ls20_1gpu.sh`
@@ -351,6 +352,8 @@ Implemented baseline training scaffold (single GPU, `ls20`):
   - `--n_samples_per_prompt` controls group size `K`
   - `--colocate_all_models` + hybrid vLLM setup
   - **do not combine** `--async_train` with `--colocate_all_models`
+  - default agent func path: `training/openrlhf/agent_func_loopagent_ls20.py`
+    (staged `DECIDER`/`LEARNER` rollout with memory updates)
 
 ## veRL Grouped Rollouts (implemented scaffold)
 

@@ -233,7 +233,7 @@ def test_plan_end_only_diagnosis() -> None:
     agent._plan_attempt_active = True
 
     agent.learner.update = lambda **_: False  # type: ignore[method-assign]
-    agent.surprise.compute = lambda **_: 0.0  # type: ignore[method-assign]
+    agent.learner.self_rate_surprise = lambda **_: 0.0  # type: ignore[method-assign]
     agent._record_surprise = lambda *_: None  # type: ignore[method-assign]
     agent._route_mode_after_boundary = lambda **_: None  # type: ignore[method-assign]
     agent._reset_subgoal_sequence_state = lambda **_: None  # type: ignore[method-assign]

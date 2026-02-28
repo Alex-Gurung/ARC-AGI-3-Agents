@@ -32,7 +32,6 @@ Treat OBJECTS/RELATIONS as helpful but possibly noisy heuristics.
 RECENT_ACTIONS:
 {action_history}
 
-MEMORY:
 {memory_text}
 
 PLAN: {active_plan}
@@ -63,7 +62,6 @@ Treat OBJECTS/RELATIONS as helpful but possibly noisy heuristics.
 RECENT_ACTIONS:
 {action_history}
 
-MEMORY:
 {memory_text}
 
 PLAN: {active_plan}

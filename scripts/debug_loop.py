@@ -164,17 +164,20 @@ def render_memory(memory: Any) -> Panel:
     if not memory or not memory.entries:
         return Panel(
             Text("(empty)", style="dim"),
-            title=f"Memory (0/{getattr(memory, 'MAX_ENTRIES', 50)})",
+            title=f"Rulebook (0/{getattr(memory, 'MAX_ENTRIES', 50)})",
             border_style="blue",
         )
 
     lines = Text()
     for i, entry in enumerate(memory.entries):
-        type_color = MEMORY_TYPE_COLORS.get(entry.type, "white")
         # Index
         lines.append(f"{i:>2} ", style="dim")
-        # Type tag
-        lines.append(f"[{entry.type:<6s}] ", style=type_color)
+        # Type tag (if present)
+        if entry.type:
+            type_color = MEMORY_TYPE_COLORS.get(entry.type, "white")
+            lines.append(f"[{entry.type:<6s}] ", style=type_color)
+        else:
+            lines.append("         ", style="dim")
         # Content (truncated)
         content = entry.content[:50]
         lines.append(content, style="white")
@@ -188,7 +191,7 @@ def render_memory(memory: Any) -> Panel:
 
     return Panel(
         lines,
-        title=f"Memory ({len(memory)}/{memory.MAX_ENTRIES})",
+        title=f"Rulebook ({len(memory)}/{memory.MAX_ENTRIES})",
         border_style="blue",
     )
 
