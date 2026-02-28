@@ -124,6 +124,7 @@ class LoopAgent(Agent):
         self._last_state_text: Optional[str] = None
         self._current_state_text: Optional[str] = None
         self._last_prediction: str = ""
+        self._last_surprise_score: float = 0.0
         self._levels_completed_at_reset: int = 0
         self._pending_subgoal_actions: list[GameAction] = []
         self._pending_subgoal_keyframe: bool = False
@@ -610,6 +611,7 @@ class LoopAgent(Agent):
                 image_diff_url=transition_image,
             )
             surprise_score = surprise_x10 / 10.0  # normalize to [0, 1]
+            self._last_surprise_score = surprise_score
             level = self._mode_to_level(self.current_mode)
             self._record_surprise(level, surprise_score)
             self._route_mode_after_boundary(
@@ -757,6 +759,7 @@ class LoopAgent(Agent):
             image_diff_url=transition_image,
         )
         surprise_score = surprise_x10 / 10.0
+        self._last_surprise_score = surprise_score
         self._record_surprise(self._subgoal_sequence_level, surprise_score)
 
         if self._subgoal_sequence_is_explore:

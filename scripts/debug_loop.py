@@ -345,34 +345,17 @@ def render_llm_io(captures: Captures, agent: Any = None) -> Panel:
         header.append("\u2500\u2500 Surprise ", style="bold green")
 
         score = sd.get("score", 0.0)
-        num_changed = sd.get("num_changed", 0)
-        running_mean = sd.get("running_mean", 0.0)
-        history_len = sd.get("history_len", 0)
-        markers = []
-        if sd.get("game_over"):
-            markers.append("GAME_OVER")
-        if sd.get("win"):
-            markers.append("WIN")
-        marker_text = f" [{', '.join(markers)}]" if markers else ""
+        score_x10 = sd.get("score_x10", score * 10)
 
         score_style = "bold red" if score > 0.5 else "bold yellow" if score > 0 else "dim green"
-        info_parts = [
-            f"cells_changed={num_changed}",
-            f"mean={running_mean:.3f}",
-            f"debiased={score:.3f}",
-            f"window={history_len}",
-        ]
-        if marker_text:
-            info_parts.append(marker_text.strip())
-        header.append(f"({', '.join(info_parts)})", style="dim")
+        header.append(f"(self-rated={score_x10:.0f}/10, normalized={score:.3f})", style="dim")
         sections.append(header)
 
         detail = Text()
-        bar_val = max(0.0, min(1.0, (score + 1) / 2))  # normalize to 0-1 for display
-        bar_len = int(bar_val * 20)
+        bar_len = int(max(0.0, min(1.0, score)) * 20)
         bar = "\u2588" * bar_len + "\u2591" * (20 - bar_len)
         detail.append(f"  {bar} ", style=score_style)
-        detail.append(f"{score:+.3f}", style=score_style)
+        detail.append(f"{score:.3f}", style=score_style)
         sections.append(detail)
 
     if not sections:
@@ -522,30 +505,25 @@ def instrument_agent(agent: Any, captures: Captures) -> None:
 
         agent.learner.diagnose = learner_diagnose_wrapper
 
-    # Capture surprise scores with detail
-    if hasattr(agent, "surprise") and hasattr(agent.surprise, "compute"):
-        orig_compute = agent.surprise.compute
+    # Capture self-rated surprise scores
+    if hasattr(agent.learner, "self_rate_surprise"):
+        orig_rate = agent.learner.self_rate_surprise
 
         def surprise_wrapper(*args: Any, **kwargs: Any) -> float:
-            # Capture inputs for display
-            action = kwargs.get("action", args[1] if len(args) > 1 else "?")
-            num_changed = kwargs.get("num_changed_cells", args[4] if len(args) > 4 else 0)
-            state_after = kwargs.get("state_after", args[2] if len(args) > 2 else "")
-            running_mean = getattr(agent.surprise, "running_mean", 0.0)
-            score = orig_compute(*args, **kwargs)
+            captures._learner_context = "learner"
+            try:
+                score_x10 = orig_rate(*args, **kwargs)
+            finally:
+                captures._learner_context = None
+            score = score_x10 / 10.0
             captures.last_surprise = score
             captures.surprise_detail = {
-                "action": str(action),
-                "num_changed": num_changed,
                 "score": score,
-                "running_mean": running_mean,
-                "game_over": "GAME_OVER" in str(state_after),
-                "win": "WIN" in str(state_after),
-                "history_len": len(getattr(agent.surprise, "history", [])),
+                "score_x10": score_x10,
             }
-            return score
+            return score_x10  # return original scale
 
-        agent.surprise.compute = surprise_wrapper
+        agent.learner.self_rate_surprise = surprise_wrapper
 
 
 # ---------------------------------------------------------------------------
