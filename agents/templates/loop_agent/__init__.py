@@ -22,7 +22,7 @@ from ...agent import Agent
 from ...tracing import trace_agent_session
 from .curiosity import Curiosity
 from .learner import Learner
-from .memory import Memory
+from .memory import Memory, MemoryEntry
 from .solver import Solver
 from .state_encoder import StateEncoder
 from .surprise import (
@@ -81,6 +81,8 @@ class LoopAgent(Agent):
     KEYFRAME_INTERVAL: int = int(os.environ.get("STATE_KEYFRAME_INTERVAL", "10"))
     USE_VISION: bool = os.environ.get("USE_VISION", "false").lower() == "true"
     VISION_CELL_SIZE: int = int(os.environ.get("VISION_CELL_SIZE", "8"))
+    CURIOSITY_NUM_SAMPLES: int = int(os.environ.get("CURIOSITY_NUM_SAMPLES", "4"))
+    LEARNER_NUM_SAMPLES: int = int(os.environ.get("LEARNER_NUM_SAMPLES", "4"))
     MISMATCH_CONF_THRESHOLD: float = float(os.environ.get("MISMATCH_CONF_THRESHOLD", "0.7"))
     STUCK_REPEAT_STATE_LIMIT: int = int(os.environ.get("STUCK_REPEAT_STATE_LIMIT", "8"))
     MODE_MIN_BOUNDARIES_ACTION: int = int(os.environ.get("MODE_MIN_BOUNDARIES_ACTION", "6"))
@@ -263,6 +265,17 @@ class LoopAgent(Agent):
         state_image_url = self._state_image_data_url(latest_frame)
         state_signature = self._frame_signature(latest_frame)
         state_visit_count = self._state_visit_counts.get(state_signature, 0)
+        missing_action_lessons_list = self.memory.missing_action_lessons(available_actions)
+        missing_action_lessons = (
+            ", ".join(missing_action_lessons_list)
+            if missing_action_lessons_list
+            else "none"
+        )
+        rulebook_status = self._rulebook_status_text(
+            available_actions=available_actions,
+            missing_action_lessons=missing_action_lessons_list,
+        )
+        semantic_discovery_status = self._semantic_discovery_status(state_text)
         action_try_counts = self._action_try_counts_text(
             available_actions=available_actions,
             state_signature=state_signature,
@@ -292,6 +305,11 @@ class LoopAgent(Agent):
             state_visit_count=state_visit_count,
             action_try_counts=action_try_counts,
             early_exploration_hint=early_exploration_hint,
+            state_signature=state_signature,
+            rulebook_status=rulebook_status,
+            missing_action_lessons=missing_action_lessons,
+            missing_action_lessons_list=missing_action_lessons_list,
+            semantic_discovery_status=semantic_discovery_status,
         )
 
     def _explore_action(
@@ -304,6 +322,11 @@ class LoopAgent(Agent):
         state_visit_count: int = 0,
         action_try_counts: str = "none",
         early_exploration_hint: str = "none",
+        state_signature: str | None = None,
+        rulebook_status: str = "none",
+        missing_action_lessons: str = "none",
+        missing_action_lessons_list: list[str] | None = None,
+        semantic_discovery_status: str = "none",
     ) -> GameAction:
         """Pick an exploratory action or subgoal sequence using curiosity."""
         level = forced_level or self.level_controller.current_level
@@ -312,11 +335,9 @@ class LoopAgent(Agent):
         grid_before = self._copy_grid(latest_frame.frame[-1] if latest_frame.frame else [])
 
         if level == "plan":
-            plan_result = self.curiosity.propose_action(
+            plan_result = self._sample_curiosity_plan(
                 state_text=state_text,
-                memory=self.memory,
                 available_actions=available_actions,
-                level="plan",
                 phase=self._phase_label(),
                 active_plan=self._active_plan_text,
                 active_subgoal=self._active_subgoal or "none",
@@ -325,6 +346,9 @@ class LoopAgent(Agent):
                 state_visit_count=state_visit_count,
                 action_try_counts=action_try_counts,
                 early_exploration_hint=early_exploration_hint,
+                rulebook_status=rulebook_status,
+                missing_action_lessons=missing_action_lessons,
+                semantic_discovery_status=semantic_discovery_status,
             )
             if plan_result.get("type") == "plan":
                 self._set_active_plan(
@@ -334,9 +358,8 @@ class LoopAgent(Agent):
 
         if level in {"subgoal", "plan"} or self._active_subgoal:
             if self._active_subgoal:
-                seq = self.curiosity.propose_subgoal_actions(
+                seq = self._sample_curiosity_subgoal_sequence(
                     state_text=state_text,
-                    memory=self.memory,
                     available_actions=available_actions,
                     max_steps=self.SUBGOAL_MAX_ACTIONS,
                     active_subgoal=self._active_subgoal,
@@ -347,6 +370,11 @@ class LoopAgent(Agent):
                     state_visit_count=state_visit_count,
                     action_try_counts=action_try_counts,
                     early_exploration_hint=early_exploration_hint,
+                    state_signature=state_signature,
+                    rulebook_status=rulebook_status,
+                    missing_action_lessons=missing_action_lessons,
+                    missing_action_lessons_list=missing_action_lessons_list or [],
+                    semantic_discovery_status=semantic_discovery_status,
                 )
                 proposed_subgoal = str(seq.get("subgoal", "")).strip()
                 if proposed_subgoal:
@@ -370,9 +398,8 @@ class LoopAgent(Agent):
                     self._last_prediction = seq.get("prediction", "")
                     return actions[0]
             else:
-                seq = self.curiosity.propose_subgoal_actions(
+                seq = self._sample_curiosity_subgoal_sequence(
                     state_text=state_text,
-                    memory=self.memory,
                     available_actions=available_actions,
                     max_steps=self.SUBGOAL_MAX_ACTIONS,
                     active_subgoal="none",
@@ -383,6 +410,11 @@ class LoopAgent(Agent):
                     state_visit_count=state_visit_count,
                     action_try_counts=action_try_counts,
                     early_exploration_hint=early_exploration_hint,
+                    state_signature=state_signature,
+                    rulebook_status=rulebook_status,
+                    missing_action_lessons=missing_action_lessons,
+                    missing_action_lessons_list=missing_action_lessons_list or [],
+                    semantic_discovery_status=semantic_discovery_status,
                 )
                 proposed_subgoal = str(seq.get("subgoal", "")).strip()
                 if proposed_subgoal:
@@ -405,11 +437,9 @@ class LoopAgent(Agent):
                         self._last_prediction = seq.get("prediction", "")
                         return actions[0]
 
-        action_result = self.curiosity.propose_action(
+        action_result = self._sample_curiosity_action(
             state_text=state_text,
-            memory=self.memory,
             available_actions=available_actions,
-            level="action",
             phase=self._phase_label(),
             active_plan=self._active_plan_text,
             active_subgoal=self._active_subgoal or "none",
@@ -418,6 +448,11 @@ class LoopAgent(Agent):
             state_visit_count=state_visit_count,
             action_try_counts=action_try_counts,
             early_exploration_hint=early_exploration_hint,
+            state_signature=state_signature,
+            rulebook_status=rulebook_status,
+            missing_action_lessons=missing_action_lessons,
+            missing_action_lessons_list=missing_action_lessons_list or [],
+            semantic_discovery_status=semantic_discovery_status,
         )
         self.explore_actions_taken += 1
         self._last_prediction = action_result.get("prediction", "")
@@ -516,6 +551,13 @@ class LoopAgent(Agent):
         )
         self._pending_subgoal_keyframe = False
         grid_after = frame_after.frame[-1] if frame_after.frame else []
+        available_actions_after = self._get_available_action_names(frame_after)
+        missing_after_list = self.memory.missing_action_lessons(available_actions_after)
+        missing_after_text = ", ".join(missing_after_list) if missing_after_list else "none"
+        rulebook_after = self._rulebook_status_text(
+            available_actions=available_actions_after,
+            missing_action_lessons=missing_after_list,
+        )
 
         diff_text = self.state_encoder.get_diff_text(grid_before, grid_after)
         num_changed = self.state_encoder.get_num_changed_cells(grid_before, grid_after)
@@ -544,7 +586,7 @@ class LoopAgent(Agent):
 
             # Non-sequence step: learner update remains separate from diagnosis.
             if self._should_run_learner(num_changed, frame_after):
-                self.learner.update(
+                self._learner_update_best_of_n(
                     state_before=state_before,
                     action_taken=action.name,
                     state_after=state_after,
@@ -557,6 +599,8 @@ class LoopAgent(Agent):
                     subgoal_index=self._active_subgoal_index if self._active_subgoal else None,
                     image_before_url=state_before_image,
                     image_after_url=state_after_image,
+                    rulebook_status=rulebook_after,
+                    missing_action_lessons=missing_after_text,
                 )
             else:
                 logger.debug("Skipping learner update on this step")
@@ -651,6 +695,13 @@ class LoopAgent(Agent):
         total_changed = self.state_encoder.get_num_changed_cells(start_grid, grid_after)
         start_image = self._grid_image_data_url(start_grid)
         end_image = self._grid_image_data_url(grid_after)
+        available_actions_after = self._get_available_action_names(frame_after)
+        missing_after_list = self.memory.missing_action_lessons(available_actions_after)
+        missing_after_text = ", ".join(missing_after_list) if missing_after_list else "none"
+        rulebook_after = self._rulebook_status_text(
+            available_actions=available_actions_after,
+            missing_action_lessons=missing_after_list,
+        )
 
         diagnosis_level: str | None = None
         if self._subgoal_sequence_level == "subgoal":
@@ -662,7 +713,7 @@ class LoopAgent(Agent):
                 image_data_url=end_image,
             )
 
-        learner_changed = self.learner.update(
+        learner_changed = self._learner_update_best_of_n(
             state_before=start_state,
             action_taken=action_taken,
             state_after=state_after,
@@ -675,6 +726,8 @@ class LoopAgent(Agent):
             subgoal_index=self._active_subgoal_index if self._active_subgoal else None,
             image_before_url=start_image,
             image_after_url=end_image,
+            rulebook_status=rulebook_after,
+            missing_action_lessons=missing_after_text,
         )
 
         surprise_score = self.surprise.compute(
@@ -788,6 +841,7 @@ class LoopAgent(Agent):
         """Create a plan if none is active."""
         if self._active_plan_steps:
             return
+        missing_actions = self.memory.missing_action_lessons(available_actions)
         result = self.curiosity.propose_action(
             state_text=state_text,
             memory=self.memory,
@@ -798,6 +852,25 @@ class LoopAgent(Agent):
             active_subgoal=self._active_subgoal or "none",
             subgoal_index=self._active_subgoal_index if self._active_subgoal else None,
             image_data_url=state_image_url,
+            state_visit_count=self._state_visit_counts.get(self._last_state_signature or "", 0),
+            action_try_counts=self._action_try_counts_text(
+                available_actions=available_actions,
+                state_signature=self._last_state_signature,
+            ),
+            early_exploration_hint=self._early_exploration_hint(
+                available_actions=available_actions,
+                state_visit_count=self._state_visit_counts.get(
+                    self._last_state_signature or "",
+                    0,
+                ),
+                state_signature=self._last_state_signature,
+            ),
+            rulebook_status=self._rulebook_status_text(
+                available_actions=available_actions,
+                missing_action_lessons=missing_actions,
+            ),
+            missing_action_lessons=", ".join(missing_actions) if missing_actions else "none",
+            semantic_discovery_status=self._semantic_discovery_status(state_text),
         )
         if result.get("type") == "plan":
             self._set_active_plan(
@@ -933,6 +1006,392 @@ class LoopAgent(Agent):
         elif mode == DecisionMode.LEARN_PLAN:
             self._reset_plan_state()
 
+    @staticmethod
+    def _action_base_name(action_name: str) -> str:
+        text = action_name.strip().upper()
+        if text.startswith("ACTION6"):
+            return "ACTION6"
+        match = re.search(r"\b(RESET|ACTION\d+)\b", text)
+        return match.group(1) if match else text
+
+    def _sample_curiosity_action(
+        self,
+        *,
+        state_text: str,
+        available_actions: list[str],
+        phase: str,
+        active_plan: str,
+        active_subgoal: str,
+        subgoal_index: int | None,
+        image_data_url: str | None,
+        state_visit_count: int,
+        action_try_counts: str,
+        early_exploration_hint: str,
+        state_signature: str | None,
+        rulebook_status: str,
+        missing_action_lessons: str,
+        missing_action_lessons_list: list[str],
+        semantic_discovery_status: str,
+    ) -> dict[str, Any]:
+        n = max(1, self.CURIOSITY_NUM_SAMPLES)
+        candidates: list[dict[str, Any]] = []
+        for _ in range(n):
+            candidates.append(
+                self.curiosity.propose_action(
+                    state_text=state_text,
+                    memory=self.memory,
+                    available_actions=available_actions,
+                    level="action",
+                    phase=phase,
+                    active_plan=active_plan,
+                    active_subgoal=active_subgoal,
+                    subgoal_index=subgoal_index,
+                    image_data_url=image_data_url,
+                    state_visit_count=state_visit_count,
+                    action_try_counts=action_try_counts,
+                    early_exploration_hint=early_exploration_hint,
+                    rulebook_status=rulebook_status,
+                    missing_action_lessons=missing_action_lessons,
+                    semantic_discovery_status=semantic_discovery_status,
+                )
+            )
+        if n == 1 or len(candidates) == 1:
+            return candidates[0]
+
+        best_idx = 0
+        best_score = float("-inf")
+        state_counts = (
+            self._state_action_attempt_counts.get(state_signature, {})
+            if state_signature
+            else {}
+        )
+        for idx, candidate in enumerate(candidates):
+            action_value = self._action_base_name(str(candidate.get("value", "")))
+            local_count = state_counts.get(action_value, 0)
+            global_count = self._action_attempt_counts.get(action_value, 0)
+            score = 0.0
+            score += 3.0 / (1.0 + local_count)
+            score += 1.0 / (1.0 + global_count)
+            if action_value in missing_action_lessons_list:
+                score += 4.0
+            if action_value == "RESET" and missing_action_lessons_list:
+                score -= 4.0
+            if action_value == "RESET":
+                score -= 1.0
+            prediction = str(candidate.get("prediction", "")).strip()
+            if prediction:
+                score += 0.2
+            if score > best_score:
+                best_score = score
+                best_idx = idx
+        return candidates[best_idx]
+
+    def _sample_curiosity_plan(
+        self,
+        *,
+        state_text: str,
+        available_actions: list[str],
+        phase: str,
+        active_plan: str,
+        active_subgoal: str,
+        subgoal_index: int | None,
+        image_data_url: str | None,
+        state_visit_count: int,
+        action_try_counts: str,
+        early_exploration_hint: str,
+        rulebook_status: str,
+        missing_action_lessons: str,
+        semantic_discovery_status: str,
+    ) -> dict[str, Any]:
+        n = max(1, self.CURIOSITY_NUM_SAMPLES)
+        candidates: list[dict[str, Any]] = []
+        for _ in range(n):
+            candidates.append(
+                self.curiosity.propose_action(
+                    state_text=state_text,
+                    memory=self.memory,
+                    available_actions=available_actions,
+                    level="plan",
+                    phase=phase,
+                    active_plan=active_plan,
+                    active_subgoal=active_subgoal,
+                    subgoal_index=subgoal_index,
+                    image_data_url=image_data_url,
+                    state_visit_count=state_visit_count,
+                    action_try_counts=action_try_counts,
+                    early_exploration_hint=early_exploration_hint,
+                    rulebook_status=rulebook_status,
+                    missing_action_lessons=missing_action_lessons,
+                    semantic_discovery_status=semantic_discovery_status,
+                )
+            )
+        if n == 1 or len(candidates) == 1:
+            return candidates[0]
+
+        best_idx = 0
+        best_score = float("-inf")
+        for idx, candidate in enumerate(candidates):
+            steps = candidate.get("steps", []) or []
+            score = float(len(steps))
+            text = str(candidate.get("value", "")).lower()
+            if "hypothesis" in text:
+                score += 0.5
+            if score > best_score:
+                best_score = score
+                best_idx = idx
+        return candidates[best_idx]
+
+    def _sample_curiosity_subgoal_sequence(
+        self,
+        *,
+        state_text: str,
+        available_actions: list[str],
+        max_steps: int,
+        active_subgoal: str,
+        phase: str,
+        level: str,
+        subgoal_index: int | None,
+        image_data_url: str | None,
+        state_visit_count: int,
+        action_try_counts: str,
+        early_exploration_hint: str,
+        state_signature: str | None,
+        rulebook_status: str,
+        missing_action_lessons: str,
+        missing_action_lessons_list: list[str],
+        semantic_discovery_status: str,
+    ) -> dict[str, Any]:
+        n = max(1, self.CURIOSITY_NUM_SAMPLES)
+        candidates: list[dict[str, Any]] = []
+        for _ in range(n):
+            candidates.append(
+                self.curiosity.propose_subgoal_actions(
+                    state_text=state_text,
+                    memory=self.memory,
+                    available_actions=available_actions,
+                    max_steps=max_steps,
+                    active_subgoal=active_subgoal,
+                    phase=phase,
+                    level=level,
+                    subgoal_index=subgoal_index,
+                    image_data_url=image_data_url,
+                    state_visit_count=state_visit_count,
+                    action_try_counts=action_try_counts,
+                    early_exploration_hint=early_exploration_hint,
+                    rulebook_status=rulebook_status,
+                    missing_action_lessons=missing_action_lessons,
+                    semantic_discovery_status=semantic_discovery_status,
+                )
+            )
+        if n == 1 or len(candidates) == 1:
+            return candidates[0]
+
+        best_idx = 0
+        best_score = float("-inf")
+        state_counts = (
+            self._state_action_attempt_counts.get(state_signature, {})
+            if state_signature
+            else {}
+        )
+        for idx, candidate in enumerate(candidates):
+            actions = [self._action_base_name(str(a)) for a in candidate.get("actions", [])]
+            if not actions:
+                continue
+            unique_actions = set(actions)
+            score = 0.0
+            score += 0.5 * len(unique_actions)
+            for action_name in unique_actions:
+                local_count = state_counts.get(action_name, 0)
+                global_count = self._action_attempt_counts.get(action_name, 0)
+                score += 2.0 / (1.0 + local_count)
+                score += 0.5 / (1.0 + global_count)
+                if action_name in missing_action_lessons_list:
+                    score += 2.5
+                if action_name == "RESET":
+                    score -= 2.0
+            if len(unique_actions) == 1 and len(actions) >= 3:
+                score -= 1.0
+            if score > best_score:
+                best_score = score
+                best_idx = idx
+        return candidates[best_idx]
+
+    @staticmethod
+    def _clone_memory(memory: Memory) -> Memory:
+        cloned = Memory(max_entries=memory.MAX_ENTRIES)
+        cloned._next_id = memory._next_id
+        cloned.entries = [
+            MemoryEntry(
+                type=entry.type,
+                content=entry.content,
+                justification=entry.justification,
+                confidence=entry.confidence,
+                created_step=entry.created_step,
+                last_modified_step=entry.last_modified_step,
+                memory_id=entry.memory_id,
+            )
+            for entry in memory.entries
+        ]
+        return cloned
+
+    def _score_learner_candidate(
+        self,
+        *,
+        before_memory: Memory,
+        after_memory: Memory,
+        action_taken: str,
+        answer_text: str,
+        state_after: str,
+        available_actions: list[str],
+    ) -> float:
+        score = 0.0
+        missing_before = before_memory.missing_action_lessons(available_actions)
+        missing_after = after_memory.missing_action_lessons(available_actions)
+        score += 2.0 * (len(missing_before) - len(missing_after))
+        if len(after_memory.entries) != len(before_memory.entries):
+            score += 0.25
+
+        action_base = self._action_base_name(action_taken)
+        if action_base.startswith("ACTION") and action_base in missing_before and action_base not in missing_after:
+            score += 4.0
+
+        completion_observed = ("STATE: WIN" in state_after.upper()) or ("LEVELS_COMPLETED:" in state_after.upper())
+        for line in answer_text.splitlines():
+            normalized = line.strip()
+            if not normalized:
+                continue
+            high_conf_match = re.search(r"\((?:conf(?:idence)?\s*:\s*)?([01](?:\.\d+)?)\)\s*$", normalized, re.IGNORECASE)
+            confidence = float(high_conf_match.group(1)) if high_conf_match else 0.0
+            if re.match(r"^(ADD|MODIFY)\s+\[(GOAL|PLAN)\]\b", normalized, re.IGNORECASE):
+                if confidence >= 0.8 and not completion_observed:
+                    score -= 3.0
+                if "HYPOTHESIS:" in normalized.upper():
+                    score += 0.5
+        return score
+
+    def _learner_update_best_of_n(
+        self,
+        *,
+        state_before: str,
+        action_taken: str,
+        state_after: str,
+        diff_text: str,
+        memory: Memory,
+        current_step: int,
+        prediction: str,
+        phase: str,
+        level: str,
+        subgoal_index: int | None,
+        image_before_url: str | None,
+        image_after_url: str | None,
+        rulebook_status: str,
+        missing_action_lessons: str,
+    ) -> bool:
+        n = max(1, self.LEARNER_NUM_SAMPLES)
+        if n == 1:
+            return self.learner.update(
+                state_before=state_before,
+                action_taken=action_taken,
+                state_after=state_after,
+                diff_text=diff_text,
+                memory=memory,
+                current_step=current_step,
+                prediction=prediction,
+                phase=phase,
+                level=level,
+                subgoal_index=subgoal_index,
+                image_before_url=image_before_url,
+                image_after_url=image_after_url,
+                rulebook_status=rulebook_status,
+                missing_action_lessons=missing_action_lessons,
+            )
+
+        original_nones = self.learner.consecutive_nones
+        available_actions = self._extract_available_actions_from_text(state_after)
+        before_snapshot = self._clone_memory(memory)
+        candidates: list[dict[str, Any]] = []
+
+        for _ in range(n):
+            candidate_memory = self._clone_memory(memory)
+            changed = self.learner.update(
+                state_before=state_before,
+                action_taken=action_taken,
+                state_after=state_after,
+                diff_text=diff_text,
+                memory=candidate_memory,
+                current_step=current_step,
+                prediction=prediction,
+                phase=phase,
+                level=level,
+                subgoal_index=subgoal_index,
+                image_before_url=image_before_url,
+                image_after_url=image_after_url,
+                rulebook_status=rulebook_status,
+                missing_action_lessons=missing_action_lessons,
+            )
+            answer_text = self.learner.last_answer_output
+            raw_text = self.learner.last_raw_output
+            score = self._score_learner_candidate(
+                before_memory=before_snapshot,
+                after_memory=candidate_memory,
+                action_taken=action_taken,
+                answer_text=answer_text,
+                state_after=state_after,
+                available_actions=available_actions,
+            )
+            candidates.append(
+                {
+                    "memory": candidate_memory,
+                    "changed": changed,
+                    "answer": answer_text,
+                    "raw": raw_text,
+                    "score": score,
+                }
+            )
+
+        best = max(candidates, key=lambda c: float(c["score"])) if candidates else None
+        if not best:
+            self.learner.consecutive_nones = original_nones + 1
+            return False
+
+        best_memory: Memory = best["memory"]
+        memory.entries = best_memory.entries
+        memory._next_id = best_memory._next_id
+        self.learner.last_answer_output = str(best["answer"])
+        self.learner.last_raw_output = str(best["raw"])
+        if bool(best["changed"]):
+            self.learner.consecutive_nones = 0
+        else:
+            self.learner.consecutive_nones = original_nones + 1
+        return bool(best["changed"])
+
+    @staticmethod
+    def _extract_available_actions_from_text(state_text: str) -> list[str]:
+        """Parse AVAILABLE_ACTIONS from encoded state text, fallback to default set."""
+        match = re.search(r"(?im)^\s*AVAILABLE_ACTIONS\s*:\s*(.+)$", state_text)
+        if not match:
+            return [
+                "RESET",
+                "ACTION1",
+                "ACTION2",
+                "ACTION3",
+                "ACTION4",
+                "ACTION5",
+                "ACTION6",
+                "ACTION7",
+            ]
+        actions = [token.strip().upper() for token in match.group(1).split(",") if token.strip()]
+        return actions or [
+            "RESET",
+            "ACTION1",
+            "ACTION2",
+            "ACTION3",
+            "ACTION4",
+            "ACTION5",
+            "ACTION6",
+            "ACTION7",
+        ]
+
     def _record_surprise(self, level: str, surprise: float) -> None:
         level_key = level if level in self.level_controller.surprise_history else "action"
         self.level_controller.surprise_history[level_key].append(surprise)
@@ -979,6 +1438,7 @@ class LoopAgent(Agent):
         available_actions = self._get_available_action_names(frame_after)
         state_signature = self._frame_signature(frame_after)
         state_visit_count = self._state_visit_counts.get(state_signature, 0)
+        missing_actions = self.memory.missing_action_lessons(available_actions)
         mode_result = self.curiosity.propose_mode(
             state_text=state_text,
             memory=self.memory,
@@ -999,6 +1459,12 @@ class LoopAgent(Agent):
                 state_visit_count=state_visit_count,
                 state_signature=state_signature,
             ),
+            rulebook_status=self._rulebook_status_text(
+                available_actions=available_actions,
+                missing_action_lessons=missing_actions,
+            ),
+            missing_action_lessons=", ".join(missing_actions) if missing_actions else "none",
+            semantic_discovery_status=self._semantic_discovery_status(state_text),
         )
         proposed_mode = str(mode_result.get("mode", self.current_mode.value)).upper()
         try:
@@ -1243,6 +1709,36 @@ class LoopAgent(Agent):
             global_count = self._action_attempt_counts.get(action_name, 0)
             parts.append(f"{action_name}:{local} (global={global_count})")
         return ", ".join(parts) if parts else "none"
+
+    def _rulebook_status_text(
+        self,
+        available_actions: list[str],
+        missing_action_lessons: list[str],
+    ) -> str:
+        """Compact summary of rule-book coverage for prompts."""
+        total = len(available_actions)
+        covered = max(0, total - len(missing_action_lessons))
+        return f"ACTION lessons covered={covered}/{total}"
+
+    def _semantic_discovery_status(self, state_text: str) -> str:
+        """Summarize semantic-understanding coverage for curiosity prompts."""
+        object_ids = sorted(set(re.findall(r"\bO\d+\b", state_text)))
+        relation_match = re.search(r"RELATIONS\s*\((\d+)\)", state_text)
+        relations_count = int(relation_match.group(1)) if relation_match else 0
+        vocab_entries = len(self.memory.get_by_type("VOCAB"))
+        rule_entries = len(self.memory.get_by_type("RULE"))
+        subgoal_entries = len(self.memory.get_by_type("SUBGOAL"))
+        goal_entries = len(self.memory.get_by_type("GOAL"))
+        unresolved_objects = max(0, len(object_ids) - vocab_entries)
+        return (
+            f"objects_in_view={len(object_ids)} "
+            f"relations_in_view={relations_count} "
+            f"vocab_lessons={vocab_entries} "
+            f"rule_lessons={rule_entries} "
+            f"subgoal_lessons={subgoal_entries} "
+            f"goal_lessons={goal_entries} "
+            f"unresolved_objects~{unresolved_objects}"
+        )
 
     def _early_exploration_hint(
         self,

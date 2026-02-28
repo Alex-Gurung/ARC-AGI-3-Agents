@@ -58,6 +58,8 @@ REFERENCE RULES:
 PHASE: {phase}
 LEVEL: {level}
 SUBGOAL_INDEX: {subgoal_index}
+RULEBOOK_STATUS: {rulebook_status}
+MISSING_ACTION_LESSONS: {missing_action_lessons}
 
 BEFORE: {state_before}
 ACTION: {action_taken}
@@ -69,6 +71,7 @@ MEMORY:
 {memory_text}
 
 Compare PREDICTION with AFTER/DIFF. Did the outcome match? Did this reveal something new, confirm a belief, or contradict something in memory?
+If ACTION is one of MISSING_ACTION_LESSONS, prioritize adding/updating an ACTION lesson for it with evidence.
 
 You may output MULTIPLE operations (one per line). Formats:
 ADD [TYPE] what we learned | why we think this (confidence 0-1)
@@ -156,6 +159,8 @@ class Learner:
         subgoal_index: int | None = None,
         image_before_url: str | None = None,
         image_after_url: str | None = None,
+        rulebook_status: str = "none",
+        missing_action_lessons: str = "none",
     ) -> bool:
         """Observe a state transition and update memory.
 
@@ -181,6 +186,8 @@ class Learner:
             phase=phase,
             level=level,
             subgoal_index=stage_subgoal_index,
+            rulebook_status=rulebook_status,
+            missing_action_lessons=missing_action_lessons,
             state_before=state_before,
             action_taken=action_taken,
             prediction=prediction or "no prediction",

@@ -195,6 +195,27 @@ class Memory:
         """Get entries with confidence below threshold."""
         return [(i, e) for i, e in enumerate(self.entries) if e.confidence < threshold]
 
+    def known_action_lessons(self) -> set[str]:
+        """Return action names explicitly covered by ACTION lessons."""
+        known: set[str] = set()
+        pattern = re.compile(r"\b(RESET|ACTION[1-7])\b", flags=re.IGNORECASE)
+        for entry in self.entries:
+            if entry.type != "ACTION":
+                continue
+            for match in pattern.findall(entry.content):
+                known.add(match.upper())
+        return known
+
+    def missing_action_lessons(self, available_actions: list[str]) -> list[str]:
+        """Return available actions that do not yet have explicit ACTION lessons."""
+        known = self.known_action_lessons()
+        missing: list[str] = []
+        for action_name in available_actions:
+            upper = action_name.upper()
+            if upper not in known:
+                missing.append(upper)
+        return missing
+
     def to_text(self) -> str:
         """Serialize full memory for LLM context."""
         if not self.entries:

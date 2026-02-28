@@ -32,6 +32,9 @@ SUBGOAL_INDEX: {subgoal_index}
 STATE_VISITS: {state_visit_count}
 ACTION_TRY_COUNTS: {action_try_counts}
 EARLY_EXPLORATION_HINT: {early_exploration_hint}
+RULEBOOK_STATUS: {rulebook_status}
+MISSING_ACTION_LESSONS: {missing_action_lessons}
+SEMANTIC_DISCOVERY_STATUS: {semantic_discovery_status}
 
 STATE:
 {state_text}
@@ -45,6 +48,9 @@ UNSURE (low confidence entries):
 Choose an action that teaches us something new or tests a weak assumption. Choose from: {available_actions_str}
 If possible, prefer a less-tried action early before repeating the same move.
 Prioritize novelty: when STATE_VISITS is high, aim for an unseen next state rather than repeating a known transition.
+If MISSING_ACTION_LESSONS is not empty, prioritize those first to build the rule-book from scratch.
+Also use actions to identify semantic object roles and mechanics (what each object does, what interactions trigger changes).
+If the path forward is unclear, test an assumption that may be wrong (e.g., goal hypothesis, action effect, interaction precondition).
 
 Briefly think step by step, then output exactly two final lines:
 ANSWER: <one action from the list>
@@ -63,6 +69,7 @@ SUBGOAL_INDEX: {subgoal_index}
 STATE_VISITS: {state_visit_count}
 ACTION_TRY_COUNTS: {action_try_counts}
 EARLY_EXPLORATION_HINT: {early_exploration_hint}
+SEMANTIC_DISCOVERY_STATUS: {semantic_discovery_status}
 
 STATE:
 {state_text}
@@ -75,6 +82,8 @@ UNSURE (low confidence entries):
 
 Propose one specific thing to investigate or test (short phrase):
 Prefer subgoals that may reach unseen states if this state has been visited repeatedly.
+Prefer subgoals that disambiguate object semantics and mechanics (e.g., touch object A to object B, enter region C, click object D).
+If progress is unclear, choose a subgoal that directly challenges a likely-false assumption.
 Briefly think step by step, then output exactly one final line:
 ANSWER: <short goal phrase>"""
 
@@ -89,6 +98,7 @@ SUBGOAL_INDEX: {subgoal_index}
 STATE_VISITS: {state_visit_count}
 ACTION_TRY_COUNTS: {action_try_counts}
 EARLY_EXPLORATION_HINT: {early_exploration_hint}
+SEMANTIC_DISCOVERY_STATUS: {semantic_discovery_status}
 
 MEMORY:
 {memory_text}
@@ -98,6 +108,8 @@ Formatting rules:
 - Use plain text steps (no angle brackets like <...>).
 - Each step should be concrete and testable from game state.
 - Avoid placeholder words (e.g., "systematically", "confirm effect") unless you name the object/interaction.
+- Strategy should progressively build semantic understanding: object identity -> interaction mechanics -> win-condition tests.
+If the route to solve is unclear, include at least one step that tests a potentially incorrect assumption.
 Briefly think step by step, then output exactly one final line:
 ANSWER: step1; step2; step3"""
 
@@ -119,12 +131,18 @@ AVAILABLE_ACTIONS: {available_actions_str}
 STATE_VISITS: {state_visit_count}
 ACTION_TRY_COUNTS: {action_try_counts}
 EARLY_EXPLORATION_HINT: {early_exploration_hint}
+RULEBOOK_STATUS: {rulebook_status}
+MISSING_ACTION_LESSONS: {missing_action_lessons}
+SEMANTIC_DISCOVERY_STATUS: {semantic_discovery_status}
 
 STATE:
 {state_text}
 
 MEMORY:
 {memory_text}
+
+If progress is unclear, switch toward testing assumptions that may be false
+(incorrect goal, incorrect action effect, incorrect subgoal/plan precondition).
 
 Briefly think step by step, then output exactly one final line:
 ANSWER: <LEARN_ACTION|LEARN_SUBGOAL|LEARN_PLAN|SOLVE>
@@ -140,6 +158,7 @@ SUBGOAL_INDEX: {subgoal_index}
 STATE_VISITS: {state_visit_count}
 ACTION_TRY_COUNTS: {action_try_counts}
 EARLY_EXPLORATION_HINT: {early_exploration_hint}
+SEMANTIC_DISCOVERY_STATUS: {semantic_discovery_status}
 
 STATE:
 {state_text}
@@ -154,6 +173,8 @@ Formatting rules:
 - SUBGOAL should name concrete target/object/interaction from current state.
 - ACTION_SEQUENCE should be explicit actions only (no prose).
  - Prefer a sequence that is likely to reach an unseen state, not a repeated local loop.
+ - Prefer sequences that isolate mechanics (single object interaction, trigger tests, precondition tests).
+ - If uncertain, select a sequence designed to falsify a key assumption.
 Use only: {available_actions_str}
 If ACTION6 is used, include coordinates as ACTION6 x y.
 
@@ -185,6 +206,9 @@ class Curiosity:
         state_visit_count: int = 0,
         action_try_counts: str = "none",
         early_exploration_hint: str = "none",
+        rulebook_status: str = "none",
+        missing_action_lessons: str = "none",
+        semantic_discovery_status: str = "none",
     ) -> dict[str, Any]:
         """Propose an exploratory action/subgoal/plan.
 
@@ -232,6 +256,9 @@ class Curiosity:
                 state_visit_count=state_visit_count,
                 action_try_counts=action_try_counts,
                 early_exploration_hint=early_exploration_hint,
+                rulebook_status=rulebook_status,
+                missing_action_lessons=missing_action_lessons,
+                semantic_discovery_status=semantic_discovery_status,
                 state_text=state_text,
                 memory_text=memory_text,
                 low_confidence_entries=low_confidence_entries,
@@ -247,6 +274,9 @@ class Curiosity:
                 state_visit_count=state_visit_count,
                 action_try_counts=action_try_counts,
                 early_exploration_hint=early_exploration_hint,
+                rulebook_status=rulebook_status,
+                missing_action_lessons=missing_action_lessons,
+                semantic_discovery_status=semantic_discovery_status,
                 state_text=state_text,
                 memory_text=memory_text,
                 low_confidence_entries=low_confidence_entries,
@@ -261,6 +291,9 @@ class Curiosity:
                 state_visit_count=state_visit_count,
                 action_try_counts=action_try_counts,
                 early_exploration_hint=early_exploration_hint,
+                rulebook_status=rulebook_status,
+                missing_action_lessons=missing_action_lessons,
+                semantic_discovery_status=semantic_discovery_status,
                 memory_text=memory_text,
             )
         else:
@@ -275,6 +308,9 @@ class Curiosity:
                 state_visit_count=state_visit_count,
                 action_try_counts=action_try_counts,
                 early_exploration_hint=early_exploration_hint,
+                rulebook_status=rulebook_status,
+                missing_action_lessons=missing_action_lessons,
+                semantic_discovery_status=semantic_discovery_status,
                 state_text=state_text,
                 memory_text=memory_text,
                 low_confidence_entries=low_confidence_entries,
@@ -324,6 +360,9 @@ class Curiosity:
         state_visit_count: int = 0,
         action_try_counts: str = "none",
         early_exploration_hint: str = "none",
+        rulebook_status: str = "none",
+        missing_action_lessons: str = "none",
+        semantic_discovery_status: str = "none",
     ) -> dict[str, Any]:
         """Choose the next top-level control mode."""
         memory_text = memory.to_text() if memory else "empty"
@@ -337,6 +376,9 @@ class Curiosity:
             state_visit_count=state_visit_count,
             action_try_counts=action_try_counts,
             early_exploration_hint=early_exploration_hint,
+            rulebook_status=rulebook_status,
+            missing_action_lessons=missing_action_lessons,
+            semantic_discovery_status=semantic_discovery_status,
             state_text=state_text,
             memory_text=memory_text,
         )
@@ -409,6 +451,9 @@ class Curiosity:
         state_visit_count: int = 0,
         action_try_counts: str = "none",
         early_exploration_hint: str = "none",
+        rulebook_status: str = "none",
+        missing_action_lessons: str = "none",
+        semantic_discovery_status: str = "none",
     ) -> dict[str, Any]:
         """Propose exploratory action sequence for a target subgoal."""
         memory_text = memory.to_text() if memory else "empty"
@@ -420,6 +465,9 @@ class Curiosity:
             state_visit_count=state_visit_count,
             action_try_counts=action_try_counts,
             early_exploration_hint=early_exploration_hint,
+            rulebook_status=rulebook_status,
+            missing_action_lessons=missing_action_lessons,
+            semantic_discovery_status=semantic_discovery_status,
             state_text=state_text,
             memory_text=memory_text,
             active_subgoal=active_subgoal or "none",
