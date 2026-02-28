@@ -6,8 +6,9 @@ Usage:
     uv run python scripts/test_state_encoder.py
 """
 
-import sys
+import base64
 import os
+import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -209,10 +210,32 @@ def test_summary():
     print("  PASS\n")
 
 
+def test_image_rendering():
+    """Test PNG data-url rendering for multimodal prompts."""
+    print("=" * 60)
+    print("TEST: Grid Image Rendering")
+    print("=" * 60)
+
+    encoder = StateEncoder()
+    grid = make_grid(8, 8, fill=0)
+    add_objects(grid, [(1, 1, 9), (2, 1, 9), (3, 3, 4), (4, 4, 11)])
+
+    data_url = encoder.grid_to_image_data_url(grid, cell_size=4)
+    assert data_url.startswith("data:image/png;base64,"), data_url[:32]
+    b64 = data_url.split(",", 1)[1]
+    png_bytes = base64.b64decode(b64)
+    assert png_bytes.startswith(b"\x89PNG\r\n\x1a\n"), "Rendered payload is not PNG"
+
+    print(f"  Data URL length: {len(data_url)}")
+    print(f"  PNG bytes: {len(png_bytes)}")
+    print("  PASS\n")
+
+
 if __name__ == "__main__":
     random.seed(42)
     test_full_grid_encoding()
     test_diff_encoding()
     test_large_diff()
     test_summary()
+    test_image_rendering()
     print("All StateEncoder tests passed!")

@@ -81,9 +81,13 @@ SUBGOAL_INDEX: {subgoal_index}
 MEMORY:
 {memory_text}
 
-Propose a strategy to test as ordered subgoals (max 5):
+Propose a strategy to test as ordered subgoals (max 5).
+Formatting rules:
+- Use plain text steps (no angle brackets like <...>).
+- Each step should be concrete and testable from game state.
+- Avoid placeholder words (e.g., "systematically", "confirm effect") unless you name the object/interaction.
 Briefly think step by step, then output exactly one final line:
-ANSWER: <step1>; <step2>; <step3>"""
+ANSWER: step1; step2; step3"""
 
 MODE_ROUTER_PROMPT = """\
 You are controlling which mode the agent should use next.
@@ -128,6 +132,9 @@ MEMORY:
 ACTIVE_SUBGOAL: {active_subgoal}
 
 Propose a subgoal attempt that teaches us something.
+Formatting rules:
+- SUBGOAL should name concrete target/object/interaction from current state.
+- ACTION_SEQUENCE should be explicit actions only (no prose).
 Use only: {available_actions_str}
 If ACTION6 is used, include coordinates as ACTION6 x y.
 
@@ -155,6 +162,7 @@ class Curiosity:
         active_plan: str = "none",
         active_subgoal: str = "none",
         subgoal_index: int | None = None,
+        image_data_url: str | None = None,
     ) -> dict[str, Any]:
         """Propose an exploratory action/subgoal/plan.
 
@@ -239,7 +247,7 @@ class Curiosity:
                 available_actions_str=available_actions_str,
             )
 
-        raw_output = self._call_llm(prompt)
+        raw_output = self._call_llm(prompt, image_data_urls=[image_data_url] if image_data_url else None)
         answer_output = self._extract_answer(raw_output)
         prediction = self._extract_expected(raw_output)
 
@@ -278,6 +286,7 @@ class Curiosity:
         active_subgoal: str,
         last_prediction: str,
         last_diagnosis_level: str,
+        image_data_url: str | None = None,
     ) -> dict[str, Any]:
         """Choose the next top-level control mode."""
         memory_text = memory.to_text() if memory else "empty"
@@ -291,23 +300,58 @@ class Curiosity:
             state_text=state_text,
             memory_text=memory_text,
         )
-        raw_output = self._call_llm(prompt)
+        raw_output = self._call_llm(prompt, image_data_urls=[image_data_url] if image_data_url else None)
         answer_output = self._extract_answer(raw_output)
         mode = self._parse_mode(answer_output)
         return {"mode": mode, "raw": raw_output}
 
-    def _call_llm(self, prompt: str) -> str:
+    def _call_llm(
+        self,
+        prompt: str,
+        image_data_urls: list[str] | None = None,
+    ) -> str:
         """Call the LLM with a single prompt, return raw text output."""
+        content: str | list[dict[str, Any]]
+        image_data_urls = [u for u in (image_data_urls or []) if u]
+        if image_data_urls:
+            content = [{"type": "text", "text": prompt}]
+            for url in image_data_urls:
+                content.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": url},
+                    }
+                )
+        else:
+            content = prompt
+
         try:
             response = self.client.chat.completions.create(
                 model=self.model,
-                messages=[{"role": "user", "content": prompt}],
+                messages=[{"role": "user", "content": content}],
                 max_tokens=1024,
                 temperature=1.0,
             )
             content = response.choices[0].message.content or ""
             return content.strip()
         except Exception as e:
+            if image_data_urls:
+                logger.warning(
+                    "Curiosity multimodal call failed; retrying text-only: %s",
+                    e,
+                )
+                try:
+                    response = self.client.chat.completions.create(
+                        model=self.model,
+                        messages=[{"role": "user", "content": prompt}],
+                        max_tokens=1024,
+                        temperature=1.0,
+                    )
+                    content = response.choices[0].message.content or ""
+                    return content.strip()
+                except Exception as retry_err:
+                    logger.error(f"Curiosity text-only retry failed: {retry_err}")
+                    return ""
             logger.error(f"Curiosity LLM call failed: {e}")
             return ""
 
@@ -321,6 +365,7 @@ class Curiosity:
         phase: str = "EXPLORE",
         level: str = "subgoal",
         subgoal_index: int | None = None,
+        image_data_url: str | None = None,
     ) -> dict[str, Any]:
         """Propose exploratory action sequence for a target subgoal."""
         memory_text = memory.to_text() if memory else "empty"
@@ -335,7 +380,7 @@ class Curiosity:
             available_actions_str=", ".join(available_actions),
             max_steps=max_steps,
         )
-        raw_output = self._call_llm(prompt)
+        raw_output = self._call_llm(prompt, image_data_urls=[image_data_url] if image_data_url else None)
         subgoal_text = self._extract_labeled_value(raw_output, "SUBGOAL") or active_subgoal
         success_test = self._extract_labeled_value(raw_output, "SUCCESS_TEST")
         action_payload = self._extract_labeled_value(raw_output, "ACTION_SEQUENCE")
@@ -489,6 +534,11 @@ class Curiosity:
         steps: list[str] = []
         for raw in parts:
             cleaned = re.sub(r"^\s*(?:\d+[\).:\-]?\s*|[-*]\s*)", "", raw).strip()
+            cleaned = cleaned.strip().strip("<>").strip().strip("\"'")
+            cleaned = re.sub(r"\s+", " ", cleaned).strip()
+            lowered = cleaned.lower()
+            if lowered in {"step", "step 1", "step 2", "step 3", "todo", "tbd"}:
+                continue
             if cleaned:
                 steps.append(cleaned)
 

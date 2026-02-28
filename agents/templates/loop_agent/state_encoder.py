@@ -5,13 +5,35 @@ Purely structural — no game-specific assumptions about what
 colors mean or what specific rows represent.
 """
 
+import base64
+import io
 import logging
 from collections import Counter
 from typing import Optional
 
 from arcengine import FrameData
+from PIL import Image
 
 logger = logging.getLogger(__name__)
+
+ARC_RGB_PALETTE: dict[int, tuple[int, int, int]] = {
+    0: (0, 0, 0),
+    1: (0, 116, 217),
+    2: (255, 65, 54),
+    3: (46, 204, 64),
+    4: (255, 220, 0),
+    5: (170, 170, 170),
+    6: (240, 18, 190),
+    7: (255, 133, 27),
+    8: (127, 219, 255),
+    9: (135, 12, 37),
+    10: (255, 255, 255),
+    11: (104, 195, 163),
+    12: (230, 126, 34),
+    13: (142, 68, 173),
+    14: (39, 174, 96),
+    15: (22, 160, 133),
+}
 
 
 def _bbox_iou(
@@ -149,6 +171,49 @@ class StateEncoder:
 
         parts.append(self._encode_summary(grid_after))
         return "\n".join(parts)
+
+    def grid_to_image_data_url(
+        self,
+        grid: list[list[int]],
+        cell_size: int = 8,
+    ) -> str:
+        """Render a grid to a PNG data URL for multimodal LLM calls."""
+        if not grid or not grid[0]:
+            return ""
+
+        cell_size = max(1, int(cell_size))
+        height = len(grid)
+        width = len(grid[0])
+
+        image = Image.new("RGB", (width, height))
+        px = image.load()
+        if px is None:
+            return ""
+
+        for y in range(height):
+            row = grid[y]
+            for x in range(width):
+                px[x, y] = ARC_RGB_PALETTE.get(row[x], (128, 128, 128))
+
+        if cell_size > 1:
+            image = image.resize(
+                (width * cell_size, height * cell_size),
+                resample=Image.Resampling.NEAREST,
+            )
+
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG")
+        encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+        return f"data:image/png;base64,{encoded}"
+
+    def frame_to_image_data_url(
+        self,
+        frame: FrameData,
+        cell_size: int = 8,
+    ) -> str:
+        """Render the latest frame grid to a PNG data URL."""
+        grid = frame.frame[-1] if frame.frame else []
+        return self.grid_to_image_data_url(grid=grid, cell_size=cell_size)
 
     def _encode_metadata(self, frame: FrameData) -> str:
         """Encode game metadata."""

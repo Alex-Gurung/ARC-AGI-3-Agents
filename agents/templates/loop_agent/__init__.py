@@ -78,7 +78,10 @@ class LoopAgent(Agent):
     SUBGOAL_NO_CHANGE_LIMIT: int = int(os.environ.get("SUBGOAL_NO_CHANGE_LIMIT", "4"))
     LEARNER_UPDATE_INTERVAL: int = int(os.environ.get("LEARNER_UPDATE_INTERVAL", "1"))
     KEYFRAME_INTERVAL: int = int(os.environ.get("STATE_KEYFRAME_INTERVAL", "10"))
+    USE_VISION: bool = os.environ.get("USE_VISION", "false").lower() == "true"
+    VISION_CELL_SIZE: int = int(os.environ.get("VISION_CELL_SIZE", "8"))
     MISMATCH_CONF_THRESHOLD: float = float(os.environ.get("MISMATCH_CONF_THRESHOLD", "0.7"))
+    STUCK_REPEAT_STATE_LIMIT: int = int(os.environ.get("STUCK_REPEAT_STATE_LIMIT", "8"))
     MODE_MIN_BOUNDARIES_ACTION: int = int(os.environ.get("MODE_MIN_BOUNDARIES_ACTION", "6"))
     MODE_MIN_BOUNDARIES_SUBGOAL: int = int(os.environ.get("MODE_MIN_BOUNDARIES_SUBGOAL", "3"))
     MODE_MIN_BOUNDARIES_PLAN: int = int(os.environ.get("MODE_MIN_BOUNDARIES_PLAN", "2"))
@@ -151,6 +154,7 @@ class LoopAgent(Agent):
         self._plan_attempt_start_state: Optional[str] = None
         self._plan_attempt_start_grid: Optional[list[list[int]]] = None
         self._last_boundary_diagnosis_level: str = "none"
+        self._repeat_state_streak: int = 0
         self._mode_boundary_counts: dict[str, int] = {
             DecisionMode.LEARN_ACTION.value: 0,
             DecisionMode.LEARN_SUBGOAL.value: 0,
@@ -226,6 +230,21 @@ class LoopAgent(Agent):
         if latest_frame.levels_completed > self._levels_completed_at_reset:
             self._on_level_complete(latest_frame)
 
+        if self._repeat_state_streak >= self.STUCK_REPEAT_STATE_LIMIT:
+            logger.info(
+                "Repeat-state escape triggered (streak=%d >= %d): forcing LEARN_ACTION",
+                self._repeat_state_streak,
+                self.STUCK_REPEAT_STATE_LIMIT,
+            )
+            self._set_mode(
+                DecisionMode.LEARN_ACTION,
+                reason="repeat-state escape",
+            )
+            self._reset_plan_state()
+            self._reset_subgoal_sequence_state(clear_pending=True)
+            self.state_encoder.force_keyframe_next("repeat_state_escape")
+            self._repeat_state_streak = 0
+
         # Execute pre-planned subgoal actions first.
         if self._pending_subgoal_actions:
             return self._pending_subgoal_actions.pop(0)
@@ -236,6 +255,7 @@ class LoopAgent(Agent):
             or self._last_state_text
             or self.state_encoder.encode(latest_frame)
         )
+        state_image_url = self._state_image_data_url(latest_frame)
 
         if self.current_mode == DecisionMode.SOLVE:
             return self._exploit_action(
@@ -243,6 +263,7 @@ class LoopAgent(Agent):
                 available_actions,
                 latest_frame,
                 forced_level="plan",
+                state_image_url=state_image_url,
             )
 
         learn_level = self._mode_to_level(self.current_mode)
@@ -251,6 +272,7 @@ class LoopAgent(Agent):
             available_actions,
             latest_frame,
             forced_level=learn_level,
+            state_image_url=state_image_url,
         )
 
     def _explore_action(
@@ -259,6 +281,7 @@ class LoopAgent(Agent):
         available_actions: list[str],
         latest_frame: FrameData,
         forced_level: str | None = None,
+        state_image_url: str | None = None,
     ) -> GameAction:
         """Pick an exploratory action or subgoal sequence using curiosity."""
         level = forced_level or self.level_controller.current_level
@@ -276,6 +299,7 @@ class LoopAgent(Agent):
                 active_plan=self._active_plan_text,
                 active_subgoal=self._active_subgoal or "none",
                 subgoal_index=stage_subgoal_index,
+                image_data_url=state_image_url,
             )
             if plan_result.get("type") == "plan":
                 self._set_active_plan(
@@ -294,6 +318,7 @@ class LoopAgent(Agent):
                     phase=self._phase_label(),
                     level=level,
                     subgoal_index=self._active_subgoal_index if self._active_subgoal else None,
+                    image_data_url=state_image_url,
                 )
                 proposed_subgoal = str(seq.get("subgoal", "")).strip()
                 if proposed_subgoal:
@@ -326,6 +351,7 @@ class LoopAgent(Agent):
                     phase=self._phase_label(),
                     level=level,
                     subgoal_index=None,
+                    image_data_url=state_image_url,
                 )
                 proposed_subgoal = str(seq.get("subgoal", "")).strip()
                 if proposed_subgoal:
@@ -357,6 +383,7 @@ class LoopAgent(Agent):
             active_plan=self._active_plan_text,
             active_subgoal=self._active_subgoal or "none",
             subgoal_index=self._active_subgoal_index if self._active_subgoal else None,
+            image_data_url=state_image_url,
         )
         self.explore_actions_taken += 1
         self._last_prediction = action_result.get("prediction", "")
@@ -369,17 +396,18 @@ class LoopAgent(Agent):
         available_actions: list[str],
         latest_frame: FrameData,
         forced_level: str | None = None,
+        state_image_url: str | None = None,
     ) -> GameAction:
         """Pick an action using solver."""
         level = forced_level or self.level_controller.current_level
         self.level_controller.current_level = level
 
         if level == "plan":
-            self._ensure_active_plan(state_text, available_actions)
+            self._ensure_active_plan(state_text, available_actions, state_image_url)
             self._ensure_active_subgoal()
 
         if self.USE_SUBGOAL_SEQUENCES and level in {"subgoal", "plan"}:
-            self._ensure_active_plan(state_text, available_actions)
+            self._ensure_active_plan(state_text, available_actions, state_image_url)
             self._ensure_active_subgoal()
 
             if self._active_subgoal:
@@ -394,6 +422,7 @@ class LoopAgent(Agent):
                     phase=self._phase_label(),
                     level=level,
                     subgoal_index=stage_subgoal_index,
+                    image_data_url=state_image_url,
                 )
                 action_names = sequence.get("actions", [])
                 actions = [
@@ -427,6 +456,7 @@ class LoopAgent(Agent):
             phase=self._phase_label(),
             level=level,
             subgoal_index=stage_subgoal_index,
+            image_data_url=state_image_url,
         )
         self._last_prediction = result.get("prediction", "")
         action_name = result.get("action", "RESET")
@@ -455,6 +485,8 @@ class LoopAgent(Agent):
 
         diff_text = self.state_encoder.get_diff_text(grid_before, grid_after)
         num_changed = self.state_encoder.get_num_changed_cells(grid_before, grid_after)
+        state_before_image = self._grid_image_data_url(grid_before)
+        state_after_image = self._grid_image_data_url(grid_after)
 
         if self._subgoal_sequence_active:
             self._handle_subgoal_sequence_step(
@@ -465,7 +497,18 @@ class LoopAgent(Agent):
                 num_changed_cells=num_changed,
             )
         else:
-            # Non-sequence step (typically exploration): keep per-step updates.
+            diagnosis_level: str | None = None
+            if action != GameAction.RESET:
+                # Diagnosis reads pre-update memory so a fresh edit does not mask mismatch.
+                diagnosis_level = self._run_mode_diagnosis(
+                    mode="action",
+                    expected=self._last_prediction,
+                    actual=state_after,
+                    subgoal_index=self._active_subgoal_index if self._active_subgoal else None,
+                    image_data_url=state_after_image,
+                )
+
+            # Non-sequence step: learner update remains separate from diagnosis.
             if self._should_run_learner(num_changed, frame_after):
                 self.learner.update(
                     state_before=state_before,
@@ -478,6 +521,8 @@ class LoopAgent(Agent):
                     phase=self._phase_label(),
                     level=self.level_controller.current_level,
                     subgoal_index=self._active_subgoal_index if self._active_subgoal else None,
+                    image_before_url=state_before_image,
+                    image_after_url=state_after_image,
                 )
             else:
                 logger.debug("Skipping learner update on this step")
@@ -491,22 +536,19 @@ class LoopAgent(Agent):
             )
             level = self._mode_to_level(self.current_mode)
             self._record_surprise(level, surprise_score)
-
-            diagnosis_level: str | None = None
-            if action != GameAction.RESET:
-                diagnosis_level = self._run_mode_diagnosis(
-                    mode="action",
-                    expected=self._last_prediction,
-                    actual=state_after,
-                    subgoal_index=self._active_subgoal_index if self._active_subgoal else None,
-                )
             self._route_mode_after_boundary(
                 state_text=state_after,
                 frame_after=frame_after,
                 diagnosis_level=diagnosis_level,
+                state_image_url=state_after_image,
             )
 
+        prev_state_text = self._last_state_text
         self._last_state_text = state_after
+        if action != GameAction.RESET and prev_state_text == state_after:
+            self._repeat_state_streak += 1
+        else:
+            self._repeat_state_streak = 0
         self._current_state_text = None
 
     def _handle_subgoal_sequence_step(
@@ -562,6 +604,18 @@ class LoopAgent(Agent):
 
         diff_text = self.state_encoder.get_diff_text(start_grid, grid_after)
         total_changed = self.state_encoder.get_num_changed_cells(start_grid, grid_after)
+        start_image = self._grid_image_data_url(start_grid)
+        end_image = self._grid_image_data_url(grid_after)
+
+        diagnosis_level: str | None = None
+        if self._subgoal_sequence_level == "subgoal":
+            diagnosis_level = self._run_mode_diagnosis(
+                mode="subgoal",
+                expected=self._subgoal_sequence_expected or self._last_prediction,
+                actual=state_after,
+                subgoal_index=self._active_subgoal_index if self._active_subgoal else None,
+                image_data_url=end_image,
+            )
 
         learner_changed = self.learner.update(
             state_before=start_state,
@@ -574,6 +628,8 @@ class LoopAgent(Agent):
             phase=self._phase_label(),
             level=self.level_controller.current_level,
             subgoal_index=self._active_subgoal_index if self._active_subgoal else None,
+            image_before_url=start_image,
+            image_after_url=end_image,
         )
 
         surprise_score = self.surprise.compute(
@@ -602,15 +658,6 @@ class LoopAgent(Agent):
             if advanced:
                 self.state_encoder.force_keyframe_next("subgoal_advance")
 
-        diagnosis_level: str | None = None
-        if self._subgoal_sequence_level == "subgoal":
-            diagnosis_level = self._run_mode_diagnosis(
-                mode="subgoal",
-                expected=self._subgoal_sequence_expected or self._last_prediction,
-                actual=state_after,
-                subgoal_index=self._active_subgoal_index if self._active_subgoal else None,
-            )
-
         if self._subgoal_sequence_level == "plan":
             plan_attempt_ended = terminal or (reason == "exhausted" and not advanced)
             if plan_attempt_ended:
@@ -619,6 +666,7 @@ class LoopAgent(Agent):
                     expected=self._active_plan_text or self._subgoal_sequence_expected,
                     actual=state_after,
                     subgoal_index=self._active_subgoal_index if self._active_subgoal else None,
+                    image_data_url=end_image,
                 )
                 self._plan_attempt_active = False
                 self._plan_attempt_start_state = None
@@ -640,6 +688,7 @@ class LoopAgent(Agent):
             state_text=state_after,
             frame_after=frame_after,
             diagnosis_level=diagnosis_level,
+            state_image_url=end_image,
         )
 
         self._reset_subgoal_sequence_state(clear_pending=True)
@@ -685,7 +734,12 @@ class LoopAgent(Agent):
         self.solver.set_subgoal(text)
         self._pending_subgoal_keyframe = True
 
-    def _ensure_active_plan(self, state_text: str, available_actions: list[str]) -> None:
+    def _ensure_active_plan(
+        self,
+        state_text: str,
+        available_actions: list[str],
+        state_image_url: str | None = None,
+    ) -> None:
         """Create a plan if none is active."""
         if self._active_plan_steps:
             return
@@ -698,6 +752,7 @@ class LoopAgent(Agent):
             active_plan=self._active_plan_text,
             active_subgoal=self._active_subgoal or "none",
             subgoal_index=self._active_subgoal_index if self._active_subgoal else None,
+            image_data_url=state_image_url,
         )
         if result.get("type") == "plan":
             self._set_active_plan(
@@ -843,6 +898,7 @@ class LoopAgent(Agent):
         state_text: str,
         frame_after: FrameData,
         diagnosis_level: str | None,
+        state_image_url: str | None = None,
     ) -> None:
         self._mode_boundary_counts[self.current_mode.value] += 1
 
@@ -851,6 +907,7 @@ class LoopAgent(Agent):
                 expected=self._last_prediction or "continued progress",
                 actual="GAME_OVER",
                 memory=self.memory,
+                image_data_url=state_image_url,
             )
             target_level = diagnosis.get("level", "action") if diagnosis else "action"
             self._set_mode(
@@ -884,6 +941,7 @@ class LoopAgent(Agent):
             active_subgoal=self._active_subgoal or "none",
             last_prediction=self._last_prediction or "none",
             last_diagnosis_level=self._last_boundary_diagnosis_level,
+            image_data_url=state_image_url,
         )
         proposed_mode = str(mode_result.get("mode", self.current_mode.value)).upper()
         try:
@@ -958,6 +1016,7 @@ class LoopAgent(Agent):
         expected: str,
         actual: str,
         subgoal_index: int | None,
+        image_data_url: str | None = None,
     ) -> str | None:
         """Run expectation diagnosis and return a routed level on mismatch."""
         diagnosis = self.learner.assess_expectation(
@@ -966,6 +1025,7 @@ class LoopAgent(Agent):
             memory=self.memory,
             mode=mode,
             subgoal_index=subgoal_index,
+            image_data_url=image_data_url,
         )
         if not diagnosis:
             return None
@@ -1020,6 +1080,7 @@ class LoopAgent(Agent):
         self._last_state_text = None
         self._current_state_text = None
         self._levels_completed_at_reset = 0
+        self._repeat_state_streak = 0
         self._mode_boundary_counts = {
             DecisionMode.LEARN_ACTION.value: 0,
             DecisionMode.LEARN_SUBGOAL.value: 0,
@@ -1039,6 +1100,7 @@ class LoopAgent(Agent):
         self.phase = Phase.EXPLOIT if self.current_mode == DecisionMode.SOLVE else Phase.EXPLORE
         self._last_state_text = None
         self._current_state_text = None
+        self._repeat_state_streak = 0
 
     def _on_level_complete(self, frame: FrameData) -> None:
         """Handle level completion — brief re-explore for new level."""
@@ -1061,6 +1123,7 @@ class LoopAgent(Agent):
         self._last_boundary_diagnosis_level = "none"
         self._last_state_text = None
         self._current_state_text = None
+        self._repeat_state_streak = 0
         self._mode_boundary_counts = {
             DecisionMode.LEARN_ACTION.value: 0,
             DecisionMode.LEARN_SUBGOAL.value: 0,
@@ -1096,6 +1159,26 @@ class LoopAgent(Agent):
             "ACTION6",
             "ACTION7",
         ]
+
+    def _state_image_data_url(self, frame: FrameData) -> str | None:
+        """Render current frame as a PNG data URL when vision is enabled."""
+        if not self.USE_VISION:
+            return None
+        image_url = self.state_encoder.frame_to_image_data_url(
+            frame=frame,
+            cell_size=self.VISION_CELL_SIZE,
+        )
+        return image_url or None
+
+    def _grid_image_data_url(self, grid: list[list[int]]) -> str | None:
+        """Render a raw grid as a PNG data URL when vision is enabled."""
+        if not self.USE_VISION:
+            return None
+        image_url = self.state_encoder.grid_to_image_data_url(
+            grid=grid,
+            cell_size=self.VISION_CELL_SIZE,
+        )
+        return image_url or None
 
     @staticmethod
     def _copy_grid(grid: list[list[int]]) -> list[list[int]]:

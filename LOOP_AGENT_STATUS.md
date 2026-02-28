@@ -25,6 +25,7 @@ sequence boundary.
 │   (RESET is control-flow only, not learning evidence)                │
 │                                                                      │
 │ Sequence boundary (or normal single-step path):                      │
+│   Expectation diagnosis (mismatch routing signal)                    │
 │   Learner update (ADD/MODIFY/REMOVE/NONE)                            │
 │   Surprise score (for Level Controller + metrics)                    │
 │   Mode routing (diagnosis-directed or mode-router LLM)               │
@@ -239,6 +240,9 @@ The `LoopAgent` is now an explore-learn-exploit harness with:
 - Explicit stage context in prompts:
   - Curiosity/Solver/Learner all receive `PHASE`, `LEVEL`, and `SUBGOAL_INDEX`
   - Curiosity also receives `ACTIVE_PLAN` and `ACTIVE_SUBGOAL`
+- Optional multimodal state input:
+  - when `USE_VISION=true`, each LLM call also receives a rendered PNG grid image
+  - if multimodal call fails, components retry automatically with text-only input
 - Configurable memory persistence mode on full reset:
   - `strict`: clear memory
   - `carry`: keep memory
@@ -272,6 +276,8 @@ Memory remains list-based with explicit numeric indices:
 - `MEMORY_PERSISTENCE_MODE` = `strict` | `carry` | `noisy`
 - `NOISY_DELETE_FRACTION`, `NOISY_CONF_JITTER`
 - `STATE_KEYFRAME_INTERVAL`
+- `USE_VISION` (`true|false`, default `false`)
+- `VISION_CELL_SIZE` (default `8`)
 - `USE_SUBGOAL_SEQUENCES` (legacy fallback: `USE_SUBGOAL_BURSTS`)
 - `SUBGOAL_MAX_ACTIONS` (legacy fallback: `BURST_MAX_STEPS`)
 - `SUBGOAL_NO_CHANGE_LIMIT`

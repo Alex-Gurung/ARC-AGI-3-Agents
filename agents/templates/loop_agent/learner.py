@@ -31,6 +31,11 @@ Focus on HIGH-LEVEL understanding — the most valuable lessons are:
 - ACTION: How actions change state (e.g., "ACTION1 moves player up 1 cell unless blocked"). Do not re-add actions already in memory.
 
 IMPORTANT: Check MEMORY below before adding anything. If a similar entry exists, use MODIFY to refine it or output NONE. Do NOT add duplicates. Actively REMOVE outdated, wrong, or redundant entries to keep memory clean.
+CRITICAL EVIDENCE RULE:
+- Only add/modify lessons when there is direct evidence in BEFORE/AFTER/DIFF.
+- If evidence is weak or ambiguous, output NONE.
+- Every lesson must include explicit evidence in the justification after "|".
+  Example evidence phrases: "DIFF shows ...", "BEFORE/AFTER changed ...", "repeated over N trials".
 When useful, explicitly write lesson hypotheses at multiple abstraction levels:
 - action lesson: what a specific action does to state
 - subgoal lesson: what attempting/completing a subgoal changes
@@ -68,6 +73,7 @@ Examples:
 - ADD [GOAL] Win seems to require touching the yellow border with the player | level ended when contact happened (0.6)
 - ADD [VOCAB] Color 11 = exit door border | touching it completed the level (0.9)
 - ADD [ACTION] ACTION4 moves player right by 1 unless blocked by black cells | observed over 4 trials (0.8)
+- ADD [ACTION] ACTION2 shifts the wave right by one cell | DIFF shows 0->9 at (x+1,y) and 9->0 at (x,y) across 3 trials (0.85)
 - MODIFY [3] Energy decreases by 2 per move, not 1 | counted more carefully (0.6)
 - REMOVE [5] | duplicate of [2]
 - REMOVE [8] | contradicted when ACTION3 moved us right, not left
@@ -139,6 +145,8 @@ class Learner:
         phase: str = "UNKNOWN",
         level: str = "action",
         subgoal_index: int | None = None,
+        image_before_url: str | None = None,
+        image_after_url: str | None = None,
     ) -> bool:
         """Observe a state transition and update memory.
 
@@ -172,7 +180,8 @@ class Learner:
             memory_text=memory_text,
         )
 
-        raw_output = self._call_llm(prompt)
+        images = [url for url in [image_before_url, image_after_url] if url]
+        raw_output = self._call_llm(prompt, image_data_urls=images or None)
         answer_output = self._extract_answer(raw_output)
         self.last_raw_output = raw_output
         self.last_answer_output = answer_output
@@ -205,6 +214,7 @@ class Learner:
         expected: str,
         actual: str,
         memory: Memory,
+        image_data_url: str | None = None,
     ) -> Optional[dict]:
         """Diagnose which abstraction level's assumption broke.
 
@@ -222,7 +232,10 @@ class Learner:
             memory_text=memory_text,
         )
 
-        raw_output = self._call_llm(prompt)
+        raw_output = self._call_llm(
+            prompt,
+            image_data_urls=[image_data_url] if image_data_url else None,
+        )
         answer_output = self._extract_answer(raw_output)
         self.last_raw_output = raw_output
         self.last_answer_output = answer_output
@@ -235,6 +248,7 @@ class Learner:
         memory: Memory,
         mode: str,
         subgoal_index: int | None = None,
+        image_data_url: str | None = None,
     ) -> Optional[dict]:
         """Assess whether the observed result was expected from memory."""
         memory_text = memory.to_text() if memory else "empty"
@@ -245,7 +259,10 @@ class Learner:
             actual=actual,
             memory_text=memory_text,
         )
-        raw_output = self._call_llm(prompt)
+        raw_output = self._call_llm(
+            prompt,
+            image_data_urls=[image_data_url] if image_data_url else None,
+        )
         answer_output = self._extract_answer(raw_output)
         self.last_raw_output = raw_output
         self.last_answer_output = answer_output
@@ -256,18 +273,50 @@ class Learner:
         prompt: str,
         max_tokens: int = 1024,
         temperature: float = 1.0,
+        image_data_urls: list[str] | None = None,
     ) -> str:
         """Call the LLM with a single prompt."""
+        content: str | list[dict[str, object]]
+        image_data_urls = [u for u in (image_data_urls or []) if u]
+        if image_data_urls:
+            content = [{"type": "text", "text": prompt}]
+            for url in image_data_urls:
+                content.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": url},
+                    }
+                )
+        else:
+            content = prompt
+
         try:
             response = self.client.chat.completions.create(
                 model=self.model,
-                messages=[{"role": "user", "content": prompt}],
+                messages=[{"role": "user", "content": content}],
                 max_tokens=max_tokens,
                 temperature=temperature,
             )
             content = response.choices[0].message.content or ""
             return content.strip()
         except Exception as e:
+            if image_data_urls:
+                logger.warning(
+                    "Learner multimodal call failed; retrying text-only: %s",
+                    e,
+                )
+                try:
+                    response = self.client.chat.completions.create(
+                        model=self.model,
+                        messages=[{"role": "user", "content": prompt}],
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                    )
+                    content = response.choices[0].message.content or ""
+                    return content.strip()
+                except Exception as retry_err:
+                    logger.error(f"Learner text-only retry failed: {retry_err}")
+                    return "NONE"
             logger.error(f"Learner LLM call failed: {e}")
             return "NONE"
 
