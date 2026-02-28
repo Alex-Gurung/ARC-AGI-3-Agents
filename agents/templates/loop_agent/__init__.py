@@ -563,6 +563,7 @@ class LoopAgent(Agent):
         num_changed = self.state_encoder.get_num_changed_cells(grid_before, grid_after)
         state_before_image = self._grid_image_data_url(grid_before)
         state_after_image = self._grid_image_data_url(grid_after)
+        transition_image = self._transition_image_data_url(grid_before, grid_after)
 
         if self._subgoal_sequence_active:
             self._handle_subgoal_sequence_step(
@@ -581,7 +582,7 @@ class LoopAgent(Agent):
                     expected=self._last_prediction,
                     actual=state_after,
                     subgoal_index=self._active_subgoal_index if self._active_subgoal else None,
-                    image_data_url=state_after_image,
+                    image_data_url=transition_image or state_after_image,
                 )
 
             # Non-sequence step: learner update remains separate from diagnosis.
@@ -599,6 +600,7 @@ class LoopAgent(Agent):
                     subgoal_index=self._active_subgoal_index if self._active_subgoal else None,
                     image_before_url=state_before_image,
                     image_after_url=state_after_image,
+                    image_diff_url=transition_image,
                     rulebook_status=rulebook_after,
                     missing_action_lessons=missing_after_text,
                 )
@@ -695,6 +697,7 @@ class LoopAgent(Agent):
         total_changed = self.state_encoder.get_num_changed_cells(start_grid, grid_after)
         start_image = self._grid_image_data_url(start_grid)
         end_image = self._grid_image_data_url(grid_after)
+        transition_image = self._transition_image_data_url(start_grid, grid_after)
         available_actions_after = self._get_available_action_names(frame_after)
         missing_after_list = self.memory.missing_action_lessons(available_actions_after)
         missing_after_text = ", ".join(missing_after_list) if missing_after_list else "none"
@@ -710,7 +713,7 @@ class LoopAgent(Agent):
                 expected=self._subgoal_sequence_expected or self._last_prediction,
                 actual=state_after,
                 subgoal_index=self._active_subgoal_index if self._active_subgoal else None,
-                image_data_url=end_image,
+                image_data_url=transition_image or end_image,
             )
 
         learner_changed = self._learner_update_best_of_n(
@@ -726,6 +729,7 @@ class LoopAgent(Agent):
             subgoal_index=self._active_subgoal_index if self._active_subgoal else None,
             image_before_url=start_image,
             image_after_url=end_image,
+            image_diff_url=transition_image,
             rulebook_status=rulebook_after,
             missing_action_lessons=missing_after_text,
         )
@@ -764,7 +768,7 @@ class LoopAgent(Agent):
                     expected=self._active_plan_text or self._subgoal_sequence_expected,
                     actual=state_after,
                     subgoal_index=self._active_subgoal_index if self._active_subgoal else None,
-                    image_data_url=end_image,
+                    image_data_url=transition_image or end_image,
                 )
                 self._plan_attempt_active = False
                 self._plan_attempt_start_state = None
@@ -1351,6 +1355,7 @@ class LoopAgent(Agent):
         subgoal_index: int | None,
         image_before_url: str | None,
         image_after_url: str | None,
+        image_diff_url: str | None,
         rulebook_status: str,
         missing_action_lessons: str,
     ) -> bool:
@@ -1369,6 +1374,7 @@ class LoopAgent(Agent):
                 subgoal_index=subgoal_index,
                 image_before_url=image_before_url,
                 image_after_url=image_after_url,
+                image_diff_url=image_diff_url,
                 rulebook_status=rulebook_status,
                 missing_action_lessons=missing_action_lessons,
             )
@@ -1394,6 +1400,7 @@ class LoopAgent(Agent):
                 subgoal_index=subgoal_index,
                 image_before_url=image_before_url,
                 image_after_url=image_after_url,
+                image_diff_url=image_diff_url,
                 rulebook_status=rulebook_status,
                 missing_action_lessons=missing_action_lessons,
             )
@@ -1880,6 +1887,21 @@ class LoopAgent(Agent):
             return None
         image_url = self.state_encoder.grid_to_image_data_url(
             grid=grid,
+            cell_size=self.VISION_CELL_SIZE,
+        )
+        return image_url or None
+
+    def _transition_image_data_url(
+        self,
+        grid_before: list[list[int]],
+        grid_after: list[list[int]],
+    ) -> str | None:
+        """Render BEFORE|AFTER|DIFF transition visualization for multimodal calls."""
+        if not self.USE_VISION:
+            return None
+        image_url = self.state_encoder.transition_image_data_url(
+            grid_before=grid_before,
+            grid_after=grid_after,
             cell_size=self.VISION_CELL_SIZE,
         )
         return image_url or None

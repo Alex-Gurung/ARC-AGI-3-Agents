@@ -242,7 +242,12 @@ The `LoopAgent` is now an explore-learn-exploit harness with:
   - Curiosity also receives `ACTIVE_PLAN` and `ACTIVE_SUBGOAL`
 - Optional multimodal state input:
   - when `USE_VISION=true`, each LLM call also receives a rendered PNG grid image
+  - learner updates receive BEFORE image, AFTER image, and a transition visual diff (BEFORE|AFTER|DIFF composite)
+  - boundary diagnosis prefers transition visual diff so mismatch reasoning can localize changed regions
   - if multimodal call fails, components retry automatically with text-only input
+- Ground-truth vs heuristic state semantics:
+  - `GRID` / `CHANGED DIFF` are primary evidence
+  - `OBJECTS` / `RELATIONS` are heuristic connected-component inferences and may be noisy
 - Configurable memory persistence mode on full reset:
   - `strict`: clear memory
   - `carry`: keep memory
@@ -255,6 +260,11 @@ The `LoopAgent` is now an explore-learn-exploit harness with:
   - includes replica-prefix replay hooks for counterfactual candidate scoring
   - includes explicit `commit_selected_candidate(...)` helper so only the selected
     branch mutates canonical trajectory state; non-selected candidates are log-only
+- OpenRLHF scaffold for single-game RL:
+  - `training/openrlhf/agent_func_ls20.py`
+  - `training/openrlhf/make_ls20_dataset.py`
+  - `training/openrlhf/run_grpo_ls20_1gpu.sh`
+  - `scripts/run_openrlhf_ls20.sh`
 
 ## Memory Model
 
@@ -278,6 +288,8 @@ Memory remains list-based with explicit numeric indices:
 - `STATE_KEYFRAME_INTERVAL`
 - `USE_VISION` (`true|false`, default `false`)
 - `VISION_CELL_SIZE` (default `8`)
+- `CURIOSITY_NUM_SAMPLES` (default `4`)
+- `LEARNER_NUM_SAMPLES` (default `4`)
 - `USE_SUBGOAL_SEQUENCES` (legacy fallback: `USE_SUBGOAL_BURSTS`)
 - `SUBGOAL_MAX_ACTIONS` (legacy fallback: `BURST_MAX_STEPS`)
 - `SUBGOAL_NO_CHANGE_LIMIT`
@@ -299,7 +311,22 @@ Memory remains list-based with explicit numeric indices:
    - noisy-memory stress eval
 8. Remove accidental build artifact from tracking: `arc_agi_3_agents.egg-info/`.
 
-## RL Direction (not implemented yet)
+## OpenRLHF (implemented scaffold)
+
+Implemented baseline training scaffold (single GPU, `ls20`):
+
+- Dataset generation:
+  - `uv run python training/openrlhf/make_ls20_dataset.py`
+- Launch script:
+  - `bash training/openrlhf/run_grpo_ls20_1gpu.sh`
+  - or `bash scripts/run_openrlhf_ls20.sh`
+- Trainer settings:
+  - `--advantage_estimator group_norm` (GRPO-style grouped advantages)
+  - `--n_samples_per_prompt` controls group size `K`
+  - `--colocate_all_models` + hybrid vLLM setup
+  - **do not combine** `--async_train` with `--colocate_all_models`
+
+## RL Direction (next)
 
 Recommended next training approach:
 

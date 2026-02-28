@@ -26,6 +26,9 @@ SUBGOAL_INDEX: {subgoal_index}
 STATE:
 {state_text}
 
+Use GRID/CHANGED DIFF as primary evidence.
+Treat OBJECTS/RELATIONS as helpful but possibly noisy heuristics.
+
 MEMORY:
 {memory_text}
 
@@ -50,6 +53,9 @@ SUBGOAL_INDEX: {subgoal_index}
 
 STATE:
 {state_text}
+
+Use GRID/CHANGED DIFF as primary evidence.
+Treat OBJECTS/RELATIONS as helpful but possibly noisy heuristics.
 
 MEMORY:
 {memory_text}

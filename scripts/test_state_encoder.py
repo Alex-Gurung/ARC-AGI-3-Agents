@@ -60,12 +60,12 @@ def test_full_grid_encoding():
     chars = len(encoded)
     approx_tokens = chars // 4  # rough estimate
 
-    print(f"  Grid size: 64x64 = 4096 cells")
+    print("  Grid size: 64x64 = 4096 cells")
     print(f"  Encoded lines: {len(lines)}")
     print(f"  Encoded chars: {chars}")
     print(f"  Approx tokens: ~{approx_tokens}")
     print(f"  Compression ratio: {4096 / max(chars, 1):.2f}x (cells/chars)")
-    print(f"  First 5 lines:")
+    print("  First 5 lines:")
     for line in lines[:5]:
         print(f"    {line}")
     print()
@@ -113,11 +113,11 @@ def test_diff_encoding():
     chars = len(encoded)
     approx_tokens = chars // 4
 
-    print(f"  Changes: 2 cells (player moved)")
+    print("  Changes: 2 cells (player moved)")
     print(f"  Encoded lines: {len(lines)}")
     print(f"  Encoded chars: {chars}")
     print(f"  Approx tokens: ~{approx_tokens}")
-    print(f"  Content:")
+    print("  Content:")
     for line in lines:
         print(f"    {line}")
     print()
@@ -162,10 +162,10 @@ def test_large_diff():
     chars = len(encoded)
     approx_tokens = chars // 4
 
-    print(f"  Changes: ~200 cells")
+    print("  Changes: ~200 cells")
     print(f"  Encoded chars: {chars}")
     print(f"  Approx tokens: ~{approx_tokens}")
-    print(f"  First 10 lines:")
+    print("  First 10 lines:")
     for line in encoded.split("\n")[:10]:
         print(f"    {line}")
     print()
@@ -202,7 +202,9 @@ def test_summary():
     encoded = encoder.encode(MockFrame())  # type: ignore[arg-type]
 
     # Find summary section
-    summary_lines = [l for l in encoded.split("\n") if "SUMMARY" in l or "Colors" in l or "Unique" in l]
+    summary_lines = [
+        line for line in encoded.split("\n") if "SUMMARY" in line or "Colors" in line or "Unique" in line
+    ]
     print("  Summary lines:")
     for line in summary_lines:
         print(f"    {line}")
@@ -226,8 +228,18 @@ def test_image_rendering():
     png_bytes = base64.b64decode(b64)
     assert png_bytes.startswith(b"\x89PNG\r\n\x1a\n"), "Rendered payload is not PNG"
 
+    grid_after = make_grid(8, 8, fill=0)
+    add_objects(grid_after, [(2, 1, 9), (3, 1, 9), (4, 3, 4), (4, 4, 11)])
+    transition_url = encoder.transition_image_data_url(grid, grid_after, cell_size=4)
+    assert transition_url.startswith("data:image/png;base64,"), transition_url[:32]
+    transition_b64 = transition_url.split(",", 1)[1]
+    transition_png = base64.b64decode(transition_b64)
+    assert transition_png.startswith(b"\x89PNG\r\n\x1a\n"), "Transition payload is not PNG"
+
     print(f"  Data URL length: {len(data_url)}")
     print(f"  PNG bytes: {len(png_bytes)}")
+    print(f"  Transition URL length: {len(transition_url)}")
+    print(f"  Transition PNG bytes: {len(transition_png)}")
     print("  PASS\n")
 
 

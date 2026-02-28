@@ -69,6 +69,13 @@ PREDICTION: {prediction}
 AFTER: {state_after}
 DIFF: {diff_text}
 
+Treat GRID/CHANGED DIFF as primary evidence.
+Treat OBJECTS/RELATIONS as helpful but possibly noisy heuristics.
+If images are attached, they are ordered as:
+- image1: BEFORE
+- image2: AFTER
+- image3: VISUAL_DIFF (BEFORE|AFTER|DIFF composite)
+
 MEMORY:
 {memory_text}
 
@@ -156,6 +163,7 @@ class Learner:
         subgoal_index: int | None = None,
         image_before_url: str | None = None,
         image_after_url: str | None = None,
+        image_diff_url: str | None = None,
         rulebook_status: str = "none",
         missing_action_lessons: str = "none",
     ) -> bool:
@@ -193,7 +201,7 @@ class Learner:
             memory_text=memory_text,
         )
 
-        images = [url for url in [image_before_url, image_after_url] if url]
+        images = [url for url in [image_before_url, image_after_url, image_diff_url] if url]
         raw_output = self._call_llm(prompt, image_data_urls=images or None)
         answer_output = self._extract_answer(raw_output)
         self.last_raw_output = raw_output

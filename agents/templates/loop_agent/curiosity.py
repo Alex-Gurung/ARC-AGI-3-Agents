@@ -39,6 +39,9 @@ SEMANTIC_DISCOVERY_STATUS: {semantic_discovery_status}
 STATE:
 {state_text}
 
+Use GRID/CHANGED DIFF as primary evidence.
+Treat OBJECTS/RELATIONS as helpful but possibly noisy heuristics.
+
 MEMORY:
 {memory_text}
 
@@ -73,6 +76,9 @@ SEMANTIC_DISCOVERY_STATUS: {semantic_discovery_status}
 
 STATE:
 {state_text}
+
+Use GRID/CHANGED DIFF as primary evidence.
+Treat OBJECTS/RELATIONS as helpful but possibly noisy heuristics.
 
 MEMORY:
 {memory_text}
@@ -118,10 +124,10 @@ You are deciding which KNOWLEDGE GAP is the biggest bottleneck right now.
 Do NOT pick an action or plan a move — only decide what the agent still needs to learn.
 
 Modes (each targets a different knowledge gap):
-- LEARN_ACTION: we do NOT yet understand what individual actions do (e.g. unknown movement effects, unclear what clicking does)
-- LEARN_SUBGOAL: we understand individual actions but do NOT know useful multi-step sequences (e.g. how to reach a target, how to avoid obstacles)
-- LEARN_PLAN: we understand useful sequences but do NOT have a complete strategy to finish the level
-- SOLVE: we have enough understanding at all levels — execute our best strategy now
+- LEARN_ACTION: we do NOT yet understand what individual actions do. Learning here will ONLY update our knowledge of individual action effects (e.g. "ACTION1 moves the player up", "ACTION3 does nothing when facing a wall").
+- LEARN_SUBGOAL: we understand individual actions but do NOT know useful multi-step sequences. Learning here will update our knowledge of small action strings that solve individual parts of a level (e.g. "move right 3 then up 2 to reach the switch", "push block into gap to create a bridge").
+- LEARN_PLAN: we understand useful sequences but do NOT know the global goals. Learning here tries to identify the overall objectives of each level and the game as a whole, and how to combine subgoals into a winning strategy.
+- SOLVE: we have enough understanding at all levels — execute our best strategy now.
 
 Decision guide:
 - Pick LEARN_ACTION if MISSING_ACTION_LESSONS lists untested actions, or memory has few/low-confidence ACTION entries.
@@ -160,6 +166,9 @@ SEMANTIC_DISCOVERY_STATUS: {semantic_discovery_status}
 
 STATE:
 {state_text}
+
+Use GRID/CHANGED DIFF as primary evidence.
+Treat OBJECTS/RELATIONS as helpful but possibly noisy heuristics.
 
 MEMORY:
 {memory_text}

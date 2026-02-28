@@ -181,30 +181,68 @@ class StateEncoder:
         if not grid or not grid[0]:
             return ""
 
-        cell_size = max(1, int(cell_size))
-        height = len(grid)
-        width = len(grid[0])
+        image = self._render_grid_image(grid)
+        return self._image_to_data_url(image=image, cell_size=cell_size)
 
-        image = Image.new("RGB", (width, height))
-        px = image.load()
-        if px is None:
+    def transition_image_data_url(
+        self,
+        grid_before: list[list[int]],
+        grid_after: list[list[int]],
+        cell_size: int = 8,
+    ) -> str:
+        """Render a visual transition diff as BEFORE | AFTER | DIFF triptych.
+
+        DIFF panel uses dim gray for unchanged cells and bright new-color pixels
+        for changed cells, so multimodal models can quickly localize updates.
+        """
+        if (not grid_before or not grid_before[0]) and (not grid_after or not grid_after[0]):
+            return ""
+
+        height = max(len(grid_before), len(grid_after))
+        width = max(
+            len(grid_before[0]) if grid_before and grid_before[0] else 0,
+            len(grid_after[0]) if grid_after and grid_after[0] else 0,
+        )
+        if width == 0 or height == 0:
+            return ""
+
+        before_norm = self._normalize_grid(grid_before, width=width, height=height)
+        after_norm = self._normalize_grid(grid_after, width=width, height=height)
+        before_image = self._render_grid_image(before_norm)
+        after_image = self._render_grid_image(after_norm)
+        diff_image = Image.new("RGB", (width, height))
+        diff_px = diff_image.load()
+        if diff_px is None:
             return ""
 
         for y in range(height):
-            row = grid[y]
             for x in range(width):
-                px[x, y] = ARC_RGB_PALETTE.get(row[x], (128, 128, 128))
+                old_val = before_norm[y][x]
+                new_val = after_norm[y][x]
+                if old_val == new_val:
+                    diff_px[x, y] = (22, 22, 22)
+                    continue
+                nr, ng, nb = ARC_RGB_PALETTE.get(new_val, (255, 255, 255))
+                # Slight brightening keeps changed pixels visible on dark panels.
+                diff_px[x, y] = (
+                    min(255, nr + 40),
+                    min(255, ng + 40),
+                    min(255, nb + 40),
+                )
 
-        if cell_size > 1:
-            image = image.resize(
-                (width * cell_size, height * cell_size),
-                resample=Image.Resampling.NEAREST,
-            )
+        separator = 1
+        triptych = Image.new("RGB", (width * 3 + separator * 2, height), (0, 0, 0))
+        triptych.paste(before_image, (0, 0))
+        triptych.paste(after_image, (width + separator, 0))
+        triptych.paste(diff_image, (2 * width + 2 * separator, 0))
 
-        buffer = io.BytesIO()
-        image.save(buffer, format="PNG")
-        encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
-        return f"data:image/png;base64,{encoded}"
+        px = triptych.load()
+        if px is not None:
+            for y in range(height):
+                px[width, y] = (235, 235, 235)
+                px[2 * width + 1, y] = (235, 235, 235)
+
+        return self._image_to_data_url(image=triptych, cell_size=cell_size)
 
     def frame_to_image_data_url(
         self,
@@ -214,6 +252,49 @@ class StateEncoder:
         """Render the latest frame grid to a PNG data URL."""
         grid = frame.frame[-1] if frame.frame else []
         return self.grid_to_image_data_url(grid=grid, cell_size=cell_size)
+
+    @staticmethod
+    def _normalize_grid(
+        grid: list[list[int]],
+        *,
+        width: int,
+        height: int,
+        fill: int = 0,
+    ) -> list[list[int]]:
+        out = [[fill for _ in range(width)] for _ in range(height)]
+        for y in range(min(height, len(grid))):
+            row = grid[y]
+            for x in range(min(width, len(row))):
+                out[y][x] = row[x]
+        return out
+
+    def _render_grid_image(self, grid: list[list[int]]) -> Image.Image:
+        """Render a grid into a non-upscaled PIL RGB image."""
+        height = len(grid)
+        width = len(grid[0]) if height > 0 else 0
+        image = Image.new("RGB", (width, height))
+        px = image.load()
+        if px is None:
+            return image
+        for y in range(height):
+            row = grid[y]
+            for x in range(width):
+                px[x, y] = ARC_RGB_PALETTE.get(row[x], (128, 128, 128))
+        return image
+
+    @staticmethod
+    def _image_to_data_url(image: Image.Image, cell_size: int) -> str:
+        """Resize nearest-neighbor and encode image as PNG data URL."""
+        cell_size = max(1, int(cell_size))
+        if cell_size > 1:
+            image = image.resize(
+                (image.width * cell_size, image.height * cell_size),
+                resample=Image.Resampling.NEAREST,
+            )
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG")
+        encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+        return f"data:image/png;base64,{encoded}"
 
     def _encode_metadata(self, frame: FrameData) -> str:
         """Encode game metadata."""
@@ -362,6 +443,10 @@ class StateEncoder:
                 f"OBJECTS ({len(selected)} shown, total={total_components}, bg={background_color}):"
             )
         ]
+        lines.append(
+            "  NOTE: object IDs/relations are heuristic inferences from connected components; "
+            "verify with GRID/DIFF (and image when available)."
+        )
         for obj in selected:
             min_x, min_y, max_x, max_y = obj["bbox"]
             lines.append(
