@@ -114,37 +114,35 @@ Briefly think step by step, then output exactly one final line:
 ANSWER: test touching blue switch; move red block to pink tile; test exit contact after trigger"""
 
 MODE_ROUTER_PROMPT = """\
-You are controlling which mode the agent should use next.
+You are deciding which KNOWLEDGE GAP is the biggest bottleneck right now.
+Do NOT pick an action or plan a move — only decide what the agent still needs to learn.
 
-Modes:
-- LEARN_ACTION: test primitive actions and immediate mechanics
-- LEARN_SUBGOAL: test short subgoal hypotheses (<=20 actions each)
-- LEARN_PLAN: test full strategies made of subgoals
-- SOLVE: use current understanding to complete the level
+Modes (each targets a different knowledge gap):
+- LEARN_ACTION: we do NOT yet understand what individual actions do (e.g. unknown movement effects, unclear what clicking does)
+- LEARN_SUBGOAL: we understand individual actions but do NOT know useful multi-step sequences (e.g. how to reach a target, how to avoid obstacles)
+- LEARN_PLAN: we understand useful sequences but do NOT have a complete strategy to finish the level
+- SOLVE: we have enough understanding at all levels — execute our best strategy now
+
+Decision guide:
+- Pick LEARN_ACTION if MISSING_ACTION_LESSONS lists untested actions, or memory has few/low-confidence ACTION entries.
+- Pick LEARN_SUBGOAL if actions are understood but memory has few SUBGOAL entries or subgoals keep failing.
+- Pick LEARN_PLAN if subgoals work but we lack a coherent plan, or the plan keeps failing.
+- Pick SOLVE only if memory has high-confidence entries at action, subgoal, AND plan levels.
+- When in doubt, pick the LOWEST level with weak understanding — filling low-level gaps first is more efficient.
 
 CURRENT_MODE: {current_mode}
 LAST_DIAGNOSIS_LEVEL: {last_diagnosis_level}
 LAST_PREDICTION: {last_prediction}
 ACTIVE_PLAN: {active_plan}
 ACTIVE_SUBGOAL: {active_subgoal}
-AVAILABLE_ACTIONS: {available_actions_str}
-STATE_VISITS: {state_visit_count}
-ACTION_TRY_COUNTS: {action_try_counts}
-EARLY_EXPLORATION_HINT: {early_exploration_hint}
 RULEBOOK_STATUS: {rulebook_status}
 MISSING_ACTION_LESSONS: {missing_action_lessons}
 SEMANTIC_DISCOVERY_STATUS: {semantic_discovery_status}
 
-STATE:
-{state_text}
-
 MEMORY:
 {memory_text}
 
-If progress is unclear, switch toward testing assumptions that may be false
-(incorrect goal, incorrect action effect, incorrect subgoal/plan precondition).
-
-Briefly think step by step, then output exactly one final line:
+Think about what knowledge is MISSING or LOW-CONFIDENCE, then output exactly one final line:
 ANSWER: <LEARN_ACTION|LEARN_SUBGOAL|LEARN_PLAN|SOLVE>
 """
 
@@ -364,7 +362,7 @@ class Curiosity:
         missing_action_lessons: str = "none",
         semantic_discovery_status: str = "none",
     ) -> dict[str, Any]:
-        """Choose the next top-level control mode."""
+        """Choose the next top-level control mode based on knowledge gaps."""
         memory_text = memory.to_text() if memory else "empty"
         prompt = MODE_ROUTER_PROMPT.format(
             current_mode=current_mode,
@@ -372,17 +370,12 @@ class Curiosity:
             last_prediction=last_prediction or "none",
             active_plan=active_plan or "none",
             active_subgoal=active_subgoal or "none",
-            available_actions_str=", ".join(available_actions),
-            state_visit_count=state_visit_count,
-            action_try_counts=action_try_counts,
-            early_exploration_hint=early_exploration_hint,
             rulebook_status=rulebook_status,
             missing_action_lessons=missing_action_lessons,
             semantic_discovery_status=semantic_discovery_status,
-            state_text=state_text,
             memory_text=memory_text,
         )
-        raw_output = self._call_llm(prompt, image_data_urls=[image_data_url] if image_data_url else None)
+        raw_output = self._call_llm(prompt)
         answer_output = self._extract_answer(raw_output)
         mode = self._parse_mode(answer_output)
         return {"mode": mode, "raw": raw_output}

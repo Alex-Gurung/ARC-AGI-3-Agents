@@ -1522,8 +1522,6 @@ class LoopAgent(Agent):
             return
 
         available_actions = self._get_available_action_names(frame_after)
-        state_signature = self._frame_signature(frame_after)
-        state_visit_count = self._state_visit_counts.get(state_signature, 0)
         missing_actions = self.memory.missing_action_lessons(available_actions)
         mode_result = self.curiosity.propose_mode(
             state_text=state_text,
@@ -1534,17 +1532,6 @@ class LoopAgent(Agent):
             active_subgoal=self._active_subgoal or "none",
             last_prediction=self._last_prediction or "none",
             last_diagnosis_level=self._last_boundary_diagnosis_level,
-            image_data_url=state_image_url,
-            state_visit_count=state_visit_count,
-            action_try_counts=self._action_try_counts_text(
-                available_actions=available_actions,
-                state_signature=state_signature,
-            ),
-            early_exploration_hint=self._early_exploration_hint(
-                available_actions=available_actions,
-                state_visit_count=state_visit_count,
-                state_signature=state_signature,
-            ),
             rulebook_status=self._rulebook_status_text(
                 available_actions=available_actions,
                 missing_action_lessons=missing_actions,
