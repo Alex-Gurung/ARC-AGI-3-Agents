@@ -29,6 +29,9 @@ LEVEL: {level}
 ACTIVE_PLAN: {active_plan}
 ACTIVE_SUBGOAL: {active_subgoal}
 SUBGOAL_INDEX: {subgoal_index}
+STATE_VISITS: {state_visit_count}
+ACTION_TRY_COUNTS: {action_try_counts}
+EARLY_EXPLORATION_HINT: {early_exploration_hint}
 
 STATE:
 {state_text}
@@ -40,6 +43,8 @@ UNSURE (low confidence entries):
 {low_confidence_entries}
 
 Choose an action that teaches us something new or tests a weak assumption. Choose from: {available_actions_str}
+If possible, prefer a less-tried action early before repeating the same move.
+Prioritize novelty: when STATE_VISITS is high, aim for an unseen next state rather than repeating a known transition.
 
 Briefly think step by step, then output exactly two final lines:
 ANSWER: <one action from the list>
@@ -55,6 +60,9 @@ LEVEL: {level}
 ACTIVE_PLAN: {active_plan}
 ACTIVE_SUBGOAL: {active_subgoal}
 SUBGOAL_INDEX: {subgoal_index}
+STATE_VISITS: {state_visit_count}
+ACTION_TRY_COUNTS: {action_try_counts}
+EARLY_EXPLORATION_HINT: {early_exploration_hint}
 
 STATE:
 {state_text}
@@ -66,6 +74,7 @@ UNSURE (low confidence entries):
 {low_confidence_entries}
 
 Propose one specific thing to investigate or test (short phrase):
+Prefer subgoals that may reach unseen states if this state has been visited repeatedly.
 Briefly think step by step, then output exactly one final line:
 ANSWER: <short goal phrase>"""
 
@@ -77,6 +86,9 @@ LEVEL: {level}
 ACTIVE_PLAN: {active_plan}
 ACTIVE_SUBGOAL: {active_subgoal}
 SUBGOAL_INDEX: {subgoal_index}
+STATE_VISITS: {state_visit_count}
+ACTION_TRY_COUNTS: {action_try_counts}
+EARLY_EXPLORATION_HINT: {early_exploration_hint}
 
 MEMORY:
 {memory_text}
@@ -104,6 +116,9 @@ LAST_PREDICTION: {last_prediction}
 ACTIVE_PLAN: {active_plan}
 ACTIVE_SUBGOAL: {active_subgoal}
 AVAILABLE_ACTIONS: {available_actions_str}
+STATE_VISITS: {state_visit_count}
+ACTION_TRY_COUNTS: {action_try_counts}
+EARLY_EXPLORATION_HINT: {early_exploration_hint}
 
 STATE:
 {state_text}
@@ -122,6 +137,9 @@ Definition: a subgoal is a short plan (up to {max_steps} actions) expected to ca
 PHASE: {phase}
 LEVEL: {level}
 SUBGOAL_INDEX: {subgoal_index}
+STATE_VISITS: {state_visit_count}
+ACTION_TRY_COUNTS: {action_try_counts}
+EARLY_EXPLORATION_HINT: {early_exploration_hint}
 
 STATE:
 {state_text}
@@ -135,6 +153,7 @@ Propose a subgoal attempt that teaches us something.
 Formatting rules:
 - SUBGOAL should name concrete target/object/interaction from current state.
 - ACTION_SEQUENCE should be explicit actions only (no prose).
+ - Prefer a sequence that is likely to reach an unseen state, not a repeated local loop.
 Use only: {available_actions_str}
 If ACTION6 is used, include coordinates as ACTION6 x y.
 
@@ -163,6 +182,9 @@ class Curiosity:
         active_subgoal: str = "none",
         subgoal_index: int | None = None,
         image_data_url: str | None = None,
+        state_visit_count: int = 0,
+        action_try_counts: str = "none",
+        early_exploration_hint: str = "none",
     ) -> dict[str, Any]:
         """Propose an exploratory action/subgoal/plan.
 
@@ -207,6 +229,9 @@ class Curiosity:
                 active_plan=active_plan_text,
                 active_subgoal=active_subgoal_text,
                 subgoal_index=stage_subgoal_index,
+                state_visit_count=state_visit_count,
+                action_try_counts=action_try_counts,
+                early_exploration_hint=early_exploration_hint,
                 state_text=state_text,
                 memory_text=memory_text,
                 low_confidence_entries=low_confidence_entries,
@@ -219,6 +244,9 @@ class Curiosity:
                 active_plan=active_plan_text,
                 active_subgoal=active_subgoal_text,
                 subgoal_index=stage_subgoal_index,
+                state_visit_count=state_visit_count,
+                action_try_counts=action_try_counts,
+                early_exploration_hint=early_exploration_hint,
                 state_text=state_text,
                 memory_text=memory_text,
                 low_confidence_entries=low_confidence_entries,
@@ -230,6 +258,9 @@ class Curiosity:
                 active_plan=active_plan_text,
                 active_subgoal=active_subgoal_text,
                 subgoal_index=stage_subgoal_index,
+                state_visit_count=state_visit_count,
+                action_try_counts=action_try_counts,
+                early_exploration_hint=early_exploration_hint,
                 memory_text=memory_text,
             )
         else:
@@ -241,6 +272,9 @@ class Curiosity:
                 active_plan=active_plan_text,
                 active_subgoal=active_subgoal_text,
                 subgoal_index=stage_subgoal_index,
+                state_visit_count=state_visit_count,
+                action_try_counts=action_try_counts,
+                early_exploration_hint=early_exploration_hint,
                 state_text=state_text,
                 memory_text=memory_text,
                 low_confidence_entries=low_confidence_entries,
@@ -287,6 +321,9 @@ class Curiosity:
         last_prediction: str,
         last_diagnosis_level: str,
         image_data_url: str | None = None,
+        state_visit_count: int = 0,
+        action_try_counts: str = "none",
+        early_exploration_hint: str = "none",
     ) -> dict[str, Any]:
         """Choose the next top-level control mode."""
         memory_text = memory.to_text() if memory else "empty"
@@ -297,6 +334,9 @@ class Curiosity:
             active_plan=active_plan or "none",
             active_subgoal=active_subgoal or "none",
             available_actions_str=", ".join(available_actions),
+            state_visit_count=state_visit_count,
+            action_try_counts=action_try_counts,
+            early_exploration_hint=early_exploration_hint,
             state_text=state_text,
             memory_text=memory_text,
         )
@@ -366,6 +406,9 @@ class Curiosity:
         level: str = "subgoal",
         subgoal_index: int | None = None,
         image_data_url: str | None = None,
+        state_visit_count: int = 0,
+        action_try_counts: str = "none",
+        early_exploration_hint: str = "none",
     ) -> dict[str, Any]:
         """Propose exploratory action sequence for a target subgoal."""
         memory_text = memory.to_text() if memory else "empty"
@@ -374,6 +417,9 @@ class Curiosity:
             phase=phase,
             level=level,
             subgoal_index=stage_subgoal_index,
+            state_visit_count=state_visit_count,
+            action_try_counts=action_try_counts,
+            early_exploration_hint=early_exploration_hint,
             state_text=state_text,
             memory_text=memory_text,
             active_subgoal=active_subgoal or "none",

@@ -36,6 +36,14 @@ CRITICAL EVIDENCE RULE:
 - If evidence is weak or ambiguous, output NONE.
 - Every lesson must include explicit evidence in the justification after "|".
   Example evidence phrases: "DIFF shows ...", "BEFORE/AFTER changed ...", "repeated over N trials".
+CONFIDENCE CALIBRATION:
+- 0.20-0.50: early hypothesis from 1 observation or weak evidence.
+- 0.50-0.75: moderate evidence (repeated consistent observations).
+- 0.75-0.90: strong evidence, but still potentially falsifiable.
+- 0.90-1.00: only for directly verified outcomes (e.g., clear WIN/level-complete condition) or many repeated confirmations.
+HYPOTHESIS POLICY:
+- For uncertain GOAL/PLAN/SUBGOAL lessons, prefix content with "Hypothesis:".
+- Do not write high-confidence GOAL/PLAN claims unless completion condition was actually observed.
 When useful, explicitly write lesson hypotheses at multiple abstraction levels:
 - action lesson: what a specific action does to state
 - subgoal lesson: what attempting/completing a subgoal changes
@@ -80,6 +88,7 @@ Examples:
 - ADD [SUBGOAL] Reaching the blue switch flips the right gate open | after 2 tries, gate changed only when switch was touched (0.7)
 - ADD [PLAN] Safe route appears to be: align key color first, then touch door border | direct door attempt caused GAME_OVER twice (0.65)
 - ADD [GOAL] Hypothesis: level completes when black square touches yellow square | completion followed contact event while score/state changed (0.55)
+- ADD [GOAL] Hypothesis: level completes when matching both shape and color on the right side | not yet verified by level completion; observed partial progress only (0.45)
 - NONE
 
 Think step by step, then output ONLY operations (no rationale/prose labels).

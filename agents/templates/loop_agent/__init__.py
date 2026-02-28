@@ -7,6 +7,7 @@ LEARN_ACTION / LEARN_SUBGOAL / LEARN_PLAN / SOLVE.
 Uses VLLM-served models via OpenAI-compatible API.
 """
 
+import hashlib
 import logging
 import os
 import re
@@ -155,6 +156,10 @@ class LoopAgent(Agent):
         self._plan_attempt_start_grid: Optional[list[list[int]]] = None
         self._last_boundary_diagnosis_level: str = "none"
         self._repeat_state_streak: int = 0
+        self._last_state_signature: Optional[str] = None
+        self._state_visit_counts: dict[str, int] = {}
+        self._state_action_attempt_counts: dict[str, dict[str, int]] = {}
+        self._action_attempt_counts: dict[str, int] = {}
         self._mode_boundary_counts: dict[str, int] = {
             DecisionMode.LEARN_ACTION.value: 0,
             DecisionMode.LEARN_SUBGOAL.value: 0,
@@ -256,6 +261,17 @@ class LoopAgent(Agent):
             or self.state_encoder.encode(latest_frame)
         )
         state_image_url = self._state_image_data_url(latest_frame)
+        state_signature = self._frame_signature(latest_frame)
+        state_visit_count = self._state_visit_counts.get(state_signature, 0)
+        action_try_counts = self._action_try_counts_text(
+            available_actions=available_actions,
+            state_signature=state_signature,
+        )
+        early_exploration_hint = self._early_exploration_hint(
+            available_actions=available_actions,
+            state_visit_count=state_visit_count,
+            state_signature=state_signature,
+        )
 
         if self.current_mode == DecisionMode.SOLVE:
             return self._exploit_action(
@@ -273,6 +289,9 @@ class LoopAgent(Agent):
             latest_frame,
             forced_level=learn_level,
             state_image_url=state_image_url,
+            state_visit_count=state_visit_count,
+            action_try_counts=action_try_counts,
+            early_exploration_hint=early_exploration_hint,
         )
 
     def _explore_action(
@@ -282,6 +301,9 @@ class LoopAgent(Agent):
         latest_frame: FrameData,
         forced_level: str | None = None,
         state_image_url: str | None = None,
+        state_visit_count: int = 0,
+        action_try_counts: str = "none",
+        early_exploration_hint: str = "none",
     ) -> GameAction:
         """Pick an exploratory action or subgoal sequence using curiosity."""
         level = forced_level or self.level_controller.current_level
@@ -300,6 +322,9 @@ class LoopAgent(Agent):
                 active_subgoal=self._active_subgoal or "none",
                 subgoal_index=stage_subgoal_index,
                 image_data_url=state_image_url,
+                state_visit_count=state_visit_count,
+                action_try_counts=action_try_counts,
+                early_exploration_hint=early_exploration_hint,
             )
             if plan_result.get("type") == "plan":
                 self._set_active_plan(
@@ -319,6 +344,9 @@ class LoopAgent(Agent):
                     level=level,
                     subgoal_index=self._active_subgoal_index if self._active_subgoal else None,
                     image_data_url=state_image_url,
+                    state_visit_count=state_visit_count,
+                    action_try_counts=action_try_counts,
+                    early_exploration_hint=early_exploration_hint,
                 )
                 proposed_subgoal = str(seq.get("subgoal", "")).strip()
                 if proposed_subgoal:
@@ -352,6 +380,9 @@ class LoopAgent(Agent):
                     level=level,
                     subgoal_index=None,
                     image_data_url=state_image_url,
+                    state_visit_count=state_visit_count,
+                    action_try_counts=action_try_counts,
+                    early_exploration_hint=early_exploration_hint,
                 )
                 proposed_subgoal = str(seq.get("subgoal", "")).strip()
                 if proposed_subgoal:
@@ -384,6 +415,9 @@ class LoopAgent(Agent):
             active_subgoal=self._active_subgoal or "none",
             subgoal_index=self._active_subgoal_index if self._active_subgoal else None,
             image_data_url=state_image_url,
+            state_visit_count=state_visit_count,
+            action_try_counts=action_try_counts,
+            early_exploration_hint=early_exploration_hint,
         )
         self.explore_actions_taken += 1
         self._last_prediction = action_result.get("prediction", "")
@@ -543,9 +577,20 @@ class LoopAgent(Agent):
                 state_image_url=state_after_image,
             )
 
-        prev_state_text = self._last_state_text
+        state_signature_after = self._frame_signature(frame_after)
+        prev_state_signature = self._last_state_signature
+        self._state_visit_counts[state_signature_after] = (
+            self._state_visit_counts.get(state_signature_after, 0) + 1
+        )
+        if state_signature_after not in self._state_action_attempt_counts:
+            self._state_action_attempt_counts[state_signature_after] = {}
+        per_state_action_counts = self._state_action_attempt_counts[state_signature_after]
+        per_state_action_counts[action.name] = per_state_action_counts.get(action.name, 0) + 1
+        self._action_attempt_counts[action.name] = self._action_attempt_counts.get(action.name, 0) + 1
+
         self._last_state_text = state_after
-        if action != GameAction.RESET and prev_state_text == state_after:
+        self._last_state_signature = state_signature_after
+        if action != GameAction.RESET and prev_state_signature == state_signature_after:
             self._repeat_state_streak += 1
         else:
             self._repeat_state_streak = 0
@@ -932,6 +977,8 @@ class LoopAgent(Agent):
             return
 
         available_actions = self._get_available_action_names(frame_after)
+        state_signature = self._frame_signature(frame_after)
+        state_visit_count = self._state_visit_counts.get(state_signature, 0)
         mode_result = self.curiosity.propose_mode(
             state_text=state_text,
             memory=self.memory,
@@ -942,6 +989,16 @@ class LoopAgent(Agent):
             last_prediction=self._last_prediction or "none",
             last_diagnosis_level=self._last_boundary_diagnosis_level,
             image_data_url=state_image_url,
+            state_visit_count=state_visit_count,
+            action_try_counts=self._action_try_counts_text(
+                available_actions=available_actions,
+                state_signature=state_signature,
+            ),
+            early_exploration_hint=self._early_exploration_hint(
+                available_actions=available_actions,
+                state_visit_count=state_visit_count,
+                state_signature=state_signature,
+            ),
         )
         proposed_mode = str(mode_result.get("mode", self.current_mode.value)).upper()
         try:
@@ -1079,8 +1136,12 @@ class LoopAgent(Agent):
         self._last_boundary_diagnosis_level = "none"
         self._last_state_text = None
         self._current_state_text = None
+        self._last_state_signature = None
         self._levels_completed_at_reset = 0
         self._repeat_state_streak = 0
+        self._state_visit_counts = {}
+        self._state_action_attempt_counts = {}
+        self._action_attempt_counts = {}
         self._mode_boundary_counts = {
             DecisionMode.LEARN_ACTION.value: 0,
             DecisionMode.LEARN_SUBGOAL.value: 0,
@@ -1100,6 +1161,7 @@ class LoopAgent(Agent):
         self.phase = Phase.EXPLOIT if self.current_mode == DecisionMode.SOLVE else Phase.EXPLORE
         self._last_state_text = None
         self._current_state_text = None
+        self._last_state_signature = None
         self._repeat_state_streak = 0
 
     def _on_level_complete(self, frame: FrameData) -> None:
@@ -1123,7 +1185,11 @@ class LoopAgent(Agent):
         self._last_boundary_diagnosis_level = "none"
         self._last_state_text = None
         self._current_state_text = None
+        self._last_state_signature = None
         self._repeat_state_streak = 0
+        self._state_visit_counts = {}
+        self._state_action_attempt_counts = {}
+        self._action_attempt_counts = {}
         self._mode_boundary_counts = {
             DecisionMode.LEARN_ACTION.value: 0,
             DecisionMode.LEARN_SUBGOAL.value: 0,
@@ -1159,6 +1225,75 @@ class LoopAgent(Agent):
             "ACTION6",
             "ACTION7",
         ]
+
+    def _action_try_counts_text(
+        self,
+        available_actions: list[str],
+        state_signature: str | None = None,
+    ) -> str:
+        """Summarize per-action attempt counts for prompt context."""
+        state_counts = (
+            self._state_action_attempt_counts.get(state_signature, {})
+            if state_signature
+            else {}
+        )
+        parts: list[str] = []
+        for action_name in available_actions:
+            local = state_counts.get(action_name, 0)
+            global_count = self._action_attempt_counts.get(action_name, 0)
+            parts.append(f"{action_name}:{local} (global={global_count})")
+        return ", ".join(parts) if parts else "none"
+
+    def _early_exploration_hint(
+        self,
+        available_actions: list[str],
+        state_visit_count: int,
+        state_signature: str | None = None,
+    ) -> str:
+        """Give curiosity lightweight guidance for early diversified exploration."""
+        if self.current_mode != DecisionMode.LEARN_ACTION:
+            return "none"
+        state_counts = (
+            self._state_action_attempt_counts.get(state_signature, {})
+            if state_signature
+            else {}
+        )
+        untested = [
+            action_name
+            for action_name in available_actions
+            if action_name != "RESET" and state_counts.get(action_name, 0) == 0
+        ]
+        if untested:
+            return (
+                "Novelty objective: prioritize actions that may reach unseen states. "
+                "In this exact state, try untested primitive actions first: "
+                + ", ".join(untested)
+            )
+        if state_visit_count >= 3:
+            return (
+                f"This state has been visited {state_visit_count} times; "
+                "prefer the least-tried action in this state to break loops."
+            )
+        return "none"
+
+    @staticmethod
+    def _grid_signature(grid: list[list[int]]) -> str:
+        """Compact stable hash for a grid state."""
+        if not grid or not grid[0]:
+            return "empty"
+        height = len(grid)
+        width = len(grid[0])
+        hasher = hashlib.blake2b(digest_size=8)
+        hasher.update(f"{width}x{height}|".encode("ascii"))
+        for row in grid:
+            hasher.update(bytes(row))
+        return hasher.hexdigest()
+
+    def _frame_signature(self, frame: FrameData) -> str:
+        """Signature for visit counting using rendered grid + game state."""
+        grid = frame.frame[-1] if frame.frame else []
+        base = self._grid_signature(grid)
+        return f"{frame.state.name}:{base}"
 
     def _state_image_data_url(self, frame: FrameData) -> str | None:
         """Render current frame as a PNG data URL when vision is enabled."""

@@ -107,6 +107,8 @@ class StepData:
     queued: int = 0
     in_subgoal_seq: bool = False
     diagnosis: str = ""
+    state_visits: int = 0
+    repeat_streak: int = 0
 
 
 @dataclass
@@ -245,6 +247,16 @@ def render_status(agent: Any, step_data: StepData) -> Panel:
             ("Seq: ", "dim"),
             ("active" if step_data.in_subgoal_seq else "-", "cyan" if step_data.in_subgoal_seq else "dim"),
         ),
+    )
+    t.add_row(
+        Text.assemble(
+            ("State visits: ", "dim"),
+            (str(step_data.state_visits), "bold"),
+            ("  Repeat streak: ", "dim"),
+            (str(step_data.repeat_streak), "bold"),
+        ),
+        Text(""),
+        Text(""),
     )
 
     mode = step_data.mode
@@ -583,6 +595,11 @@ def run(
                 queued=len(agent._pending_subgoal_actions),
                 in_subgoal_seq=agent._subgoal_sequence_active,
                 diagnosis=getattr(agent, "_last_boundary_diagnosis_level", "none"),
+                state_visits=getattr(agent, "_state_visit_counts", {}).get(
+                    getattr(agent, "_last_state_signature", "") or "",
+                    0,
+                ),
+                repeat_streak=getattr(agent, "_repeat_state_streak", 0),
             )
             history.append(sd)
 
