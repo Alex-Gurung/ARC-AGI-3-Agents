@@ -3,9 +3,11 @@
 Part 1: Hand-crafted prediction/observation pairs → judge scores them.
 Part 2: Full WM→Observer→Judge pipeline on synthetic transitions → see
         what the model says about its own outputs.
+Part 3: Grid representation comprehension — can the model read the RLE
+        format and answer factual questions about cell positions/colors?
 
 Usage:
-    VLLM_BASE_URL=http://localhost:8000/v1 VLLM_MODEL=google/gemma-3-1b-it \
+    VLLM_BASE_URL=http://localhost:8000/v1 VLLM_MODEL=google/gemma-3-4b-it \
         uv run python scripts/test_surprise_estimation.py
 """
 
@@ -21,6 +23,7 @@ from openai import OpenAI
 
 from agents.templates.loop_agent.learner import Learner
 from agents.templates.loop_agent.memory import Memory, MemoryEntry
+from agents.templates.loop_agent.state_encoder import StateEncoder
 
 VLLM_BASE_URL = os.environ.get("VLLM_BASE_URL", "http://localhost:8000/v1")
 VLLM_MODEL = os.environ.get("VLLM_MODEL", "google/gemma-3-1b-it")
@@ -299,6 +302,359 @@ def run_part2(learner: Learner) -> list[dict]:
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Part 3: Grid representation comprehension
+# ──────────────────────────────────────────────────────────────────────
+
+GRID_5x5 = textwrap.dedent("""\
+    GRID (5x5):
+    r0: 5*5
+    r1: 5 0*3 5
+    r2: 5 0 3 0 5
+    r3: 5 0*3 5
+    r4: 5*5
+    SUMMARY: 5x5 grid, colors: 0:6, 3:1, 5:18""")
+
+GRID_7x7 = textwrap.dedent("""\
+    GRID (7x7):
+    r0: 5*7
+    r1: 5 0*5 5
+    r2: 5 0 0 3 0 0 5
+    r3: 5 0 0 2 0 0 5
+    r4: 5 0 0 2 0 0 5
+    r5: 5 0*5 5
+    r6: 5*7
+    SUMMARY: 7x7 grid, colors: 0:20, 2:2, 3:1, 5:26""")
+
+DIFF_TEXT = textwrap.dedent("""\
+    BEFORE GRID (5x5):
+    r0: 5*5
+    r1: 5 0*3 5
+    r2: 5 0 3 0 5
+    r3: 5 0*3 5
+    r4: 5*5
+
+    CHANGED CELLS:
+    (2,2):3->0
+    (1,2):0->3
+
+    AFTER GRID (5x5):
+    r0: 5*5
+    r1: 5 0 3 0 5
+    r2: 5 0*3 5
+    r3: 5 0*3 5
+    r4: 5*5""")
+
+COMPREHENSION_QS: list[dict] = [
+    # --- Cell lookup ---
+    {
+        "label": "Cell lookup: r2,c2 in 5x5",
+        "grid": GRID_5x5,
+        "question": "What color is the cell at row 2, column 2?",
+        "accept": ["3"],
+        "category": "cell_lookup",
+    },
+    {
+        "label": "Cell lookup: r0,c0 in 5x5 (corner)",
+        "grid": GRID_5x5,
+        "question": "What color is the cell at row 0, column 0?",
+        "accept": ["5"],
+        "category": "cell_lookup",
+    },
+    {
+        "label": "Cell lookup: r1,c2 in 5x5 (interior)",
+        "grid": GRID_5x5,
+        "question": "What color is the cell at row 1, column 2?",
+        "accept": ["0"],
+        "category": "cell_lookup",
+    },
+    {
+        "label": "Cell lookup: r3,c3 in 7x7",
+        "grid": GRID_7x7,
+        "question": "What color is the cell at row 3, column 3?",
+        "accept": ["2"],
+        "category": "cell_lookup",
+    },
+    {
+        "label": "Cell lookup: r2,c3 in 7x7",
+        "grid": GRID_7x7,
+        "question": "What color is the cell at row 2, column 3?",
+        "accept": ["3"],
+        "category": "cell_lookup",
+    },
+    # --- Counting ---
+    {
+        "label": "Count: how many color-3 cells in 5x5",
+        "grid": GRID_5x5,
+        "question": "How many cells have color 3?",
+        "accept": ["1", "one"],
+        "category": "counting",
+    },
+    {
+        "label": "Count: how many color-5 cells in 5x5",
+        "grid": GRID_5x5,
+        "question": "How many cells have color 5?",
+        "accept": ["18", "eighteen"],
+        "category": "counting",
+    },
+    {
+        "label": "Count: how many color-2 cells in 7x7",
+        "grid": GRID_7x7,
+        "question": "How many cells have color 2?",
+        "accept": ["2", "two"],
+        "category": "counting",
+    },
+    # --- RLE expansion ---
+    {
+        "label": "RLE expand: list row 1 of 5x5",
+        "grid": GRID_5x5,
+        "question": "List the color of each cell in row 1, left to right, separated by spaces.",
+        "accept": ["5 0 0 0 5"],
+        "category": "rle_expand",
+    },
+    {
+        "label": "RLE expand: list row 2 of 7x7",
+        "grid": GRID_7x7,
+        "question": "List the color of each cell in row 2, left to right, separated by spaces.",
+        "accept": ["5 0 0 3 0 0 5"],
+        "category": "rle_expand",
+    },
+    # --- Grid dimensions ---
+    {
+        "label": "Dimensions: 5x5",
+        "grid": GRID_5x5,
+        "question": "How many rows and columns does this grid have?",
+        "accept": ["5", "5x5", "5 rows and 5 columns", "5 rows, 5 columns"],
+        "category": "dimensions",
+    },
+    # --- Spatial / adjacency ---
+    {
+        "label": "Adjacency: what is directly above color 3 in 5x5",
+        "grid": GRID_5x5,
+        "question": "The cell with color 3 is at row 2, column 2. What color is the cell directly above it (row 1, column 2)?",
+        "accept": ["0"],
+        "category": "spatial",
+    },
+    {
+        "label": "Adjacency: what is directly below color 3 in 7x7",
+        "grid": GRID_7x7,
+        "question": "The cell with color 3 is at row 2, column 3. What color is the cell directly below it (row 3, column 3)?",
+        "accept": ["2"],
+        "category": "spatial",
+    },
+    # --- Diff comprehension ---
+    {
+        "label": "Diff: which cell gained color 3",
+        "grid": DIFF_TEXT,
+        "question": "After the change, which cell now has color 3 that didn't have it before? Give row and column.",
+        "accept": ["1,2", "row 1, column 2", "r1,c2", "(1,2)", "row 1 column 2", "1, 2"],
+        "category": "diff",
+    },
+    {
+        "label": "Diff: what happened to old color-3 cell",
+        "grid": DIFF_TEXT,
+        "question": "Cell (2,2) changed from color 3 to what color?",
+        "accept": ["0"],
+        "category": "diff",
+    },
+]
+
+COMPREHENSION_PROMPT_TEXT = """\
+You are reading a game grid encoded in RLE (run-length encoding) format.
+
+In this format:
+- "r0:", "r1:", etc. are row indices (top to bottom)
+- Numbers are cell colors
+- "N*K" means color N repeated K times
+- For example: "r0: 5*3 0 2" means row 0 has cells [5, 5, 5, 0, 2]
+
+{grid}
+
+{question}
+
+Think step by step, then output exactly one final line:
+ANSWER: <your answer>"""
+
+COMPREHENSION_PROMPT_VISUAL = """\
+You are looking at a game grid. An image of the grid is attached.
+
+The grid uses these colors (by index):
+0=black, 1=blue, 2=red, 3=green, 4=yellow, 5=grey, 6=pink, 7=orange, 8=light-blue, 9=dark-red
+
+Row 0 is the top row. Column 0 is the leftmost column.
+
+{grid}
+
+{question}
+
+Think step by step, then output exactly one final line:
+ANSWER: <your answer>"""
+
+# Actual grid arrays matching the RLE definitions above
+GRID_5x5_ARRAY = [
+    [5, 5, 5, 5, 5],
+    [5, 0, 0, 0, 5],
+    [5, 0, 3, 0, 5],
+    [5, 0, 0, 0, 5],
+    [5, 5, 5, 5, 5],
+]
+
+GRID_7x7_ARRAY = [
+    [5, 5, 5, 5, 5, 5, 5],
+    [5, 0, 0, 0, 0, 0, 5],
+    [5, 0, 0, 3, 0, 0, 5],
+    [5, 0, 0, 2, 0, 0, 5],
+    [5, 0, 0, 2, 0, 0, 5],
+    [5, 0, 0, 0, 0, 0, 5],
+    [5, 5, 5, 5, 5, 5, 5],
+]
+
+# After-state for the diff questions (color 3 moved from r2c2 to r1c2)
+GRID_5x5_AFTER_ARRAY = [
+    [5, 5, 5, 5, 5],
+    [5, 0, 3, 0, 5],
+    [5, 0, 0, 0, 5],
+    [5, 0, 0, 0, 5],
+    [5, 5, 5, 5, 5],
+]
+
+
+def _extract_answer(raw: str) -> str:
+    """Pull text after the last ANSWER: marker."""
+    if "ANSWER:" in raw.upper():
+        idx = raw.upper().rfind("ANSWER:")
+        return raw[idx + 7:].strip()
+    return raw.strip()
+
+
+def _check_answer(answer: str, accept: list[str]) -> bool:
+    answer_lower = answer.lower().strip().rstrip(".")
+    return any(acc.lower() in answer_lower for acc in accept)
+
+
+def _ask_llm(
+    client: OpenAI,
+    model: str,
+    prompt: str,
+    image_url: str | None = None,
+) -> str:
+    """Single LLM call, optionally with an image."""
+    if image_url:
+        content: list[dict] = [
+            {"type": "text", "text": prompt},
+            {"type": "image_url", "image_url": {"url": image_url}},
+        ]
+    else:
+        content = prompt  # type: ignore[assignment]
+
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": content}],
+            max_tokens=256,
+            temperature=0.3,
+        )
+        return (response.choices[0].message.content or "").strip()
+    except Exception as e:
+        return f"ERROR: {e}"
+
+
+def run_part3(client: OpenAI, model: str) -> list[dict]:
+    """Test grid comprehension: text-only vs text+image, side by side."""
+    print(f"\n{HR}")
+    print("PART 3: Grid representation comprehension (text vs text+image)")
+    print(HR)
+
+    encoder = StateEncoder()
+
+    # Map each grid text block to its rendered image
+    grid_images: dict[str, str] = {}
+    grid_images[id(GRID_5x5)] = encoder.grid_to_image_data_url(GRID_5x5_ARRAY, cell_size=16)
+    grid_images[id(GRID_7x7)] = encoder.grid_to_image_data_url(GRID_7x7_ARRAY, cell_size=16)
+    # For diff questions, render before|after triptych
+    grid_images[id(DIFF_TEXT)] = encoder.transition_image_data_url(
+        GRID_5x5_ARRAY, GRID_5x5_AFTER_ARRAY, cell_size=16,
+    )
+
+    # Build grid-id lookup for each question
+    grid_obj_ids = {}
+    for q in COMPREHENSION_QS:
+        if q["grid"] is GRID_5x5:
+            grid_obj_ids[q["label"]] = id(GRID_5x5)
+        elif q["grid"] is GRID_7x7:
+            grid_obj_ids[q["label"]] = id(GRID_7x7)
+        else:
+            grid_obj_ids[q["label"]] = id(DIFF_TEXT)
+
+    results = []
+    cat_text: dict[str, list[bool]] = {}
+    cat_visual: dict[str, list[bool]] = {}
+
+    for q in COMPREHENSION_QS:
+        cat = q["category"]
+        if cat not in cat_text:
+            cat_text[cat] = []
+            cat_visual[cat] = []
+
+        # --- Text-only ---
+        prompt_t = COMPREHENSION_PROMPT_TEXT.format(grid=q["grid"], question=q["question"])
+        raw_t = _ask_llm(client, model, prompt_t)
+        ans_t = _extract_answer(raw_t)
+        ok_t = _check_answer(ans_t, q["accept"])
+        cat_text[cat].append(ok_t)
+
+        # --- Text + Image ---
+        img_url = grid_images.get(grid_obj_ids[q["label"]], "")
+        prompt_v = COMPREHENSION_PROMPT_VISUAL.format(grid=q["grid"], question=q["question"])
+        raw_v = _ask_llm(client, model, prompt_v, image_url=img_url if img_url else None)
+        ans_v = _extract_answer(raw_v)
+        ok_v = _check_answer(ans_v, q["accept"])
+        cat_visual[cat].append(ok_v)
+
+        tag_t = "OK" if ok_t else "X "
+        tag_v = "OK" if ok_v else "X "
+
+        results.append({
+            "label": q["label"],
+            "category": cat,
+            "text_correct": ok_t,
+            "visual_correct": ok_v,
+            "text_answer": ans_t,
+            "visual_answer": ans_v,
+            "accepted": q["accept"],
+        })
+
+        print(f"\n  {q['label']}")
+        print(f"    Q: {q['question']}")
+        print(f"    text  [{tag_t}]: {ans_t[:80]}")
+        print(f"    image [{tag_v}]: {ans_v[:80]}")
+        print(f"    expected: {q['accept']}")
+
+    # Category summary
+    print(f"\n  {'─' * 60}")
+    print(f"  {'Category':<15s}  {'Text':>8s}  {'Image':>8s}  {'Delta':>6s}")
+    print(f"  {'─' * 60}")
+    total_t = total_v = total_n = 0
+    for cat in sorted(cat_text.keys()):
+        nt = sum(cat_text[cat])
+        nv = sum(cat_visual[cat])
+        n = len(cat_text[cat])
+        total_t += nt
+        total_v += nv
+        total_n += n
+        delta = nv - nt
+        sign = "+" if delta > 0 else ""
+        print(f"    {cat:<15s}  {nt}/{n:>3d}      {nv}/{n:>3d}      {sign}{delta}")
+
+    dt = total_v - total_t
+    sign = "+" if dt > 0 else ""
+    print(f"    {'TOTAL':<15s}  {total_t}/{total_n:>3d}      {total_v}/{total_n:>3d}      {sign}{dt}")
+    print(f"\n  Text accuracy:  {100 * total_t / total_n:.0f}%")
+    print(f"  Image accuracy: {100 * total_v / total_n:.0f}%")
+
+    return results
+
+
+# ──────────────────────────────────────────────────────────────────────
 # Main
 # ──────────────────────────────────────────────────────────────────────
 
@@ -306,9 +662,10 @@ def main() -> None:
     print(f"Connecting to VLLM: {VLLM_BASE_URL}  model: {VLLM_MODEL}")
     learner = make_learner()
 
+    client = OpenAI(base_url=VLLM_BASE_URL, api_key=VLLM_API_KEY)
+
     # Quick connectivity check
     try:
-        client = OpenAI(base_url=VLLM_BASE_URL, api_key=VLLM_API_KEY)
         models = client.models.list()
         available = [m.id for m in models.data]
         print(f"Available models: {available}")
@@ -319,6 +676,7 @@ def main() -> None:
 
     p1_results = run_part1(learner)
     p2_results = run_part2(learner)
+    p3_results = run_part3(client, VLLM_MODEL)
 
     # Final summary
     print(f"\n{HR}")
@@ -338,6 +696,11 @@ def main() -> None:
     avg_sim = sum(r["similarity"] for r in p2_results) / max(len(p2_results), 1)
     print(f"\n  Average pipeline similarity: {avg_sim:.1f}/5")
     print(f"  Average pipeline surprise:   {(6 - avg_sim) / 5.0:.2f}")
+
+    p3_text = sum(1 for r in p3_results if r["text_correct"])
+    p3_img = sum(1 for r in p3_results if r["visual_correct"])
+    n3 = len(p3_results)
+    print(f"\nPart 3 — Grid comprehension: text={p3_text}/{n3}  image={p3_img}/{n3}")
 
 
 if __name__ == "__main__":
