@@ -115,9 +115,12 @@ class Captures:
     curiosity: dict[str, Any] = field(default_factory=dict)
     solver: dict[str, Any] = field(default_factory=dict)
     learner: dict[str, Any] = field(default_factory=dict)
+    learner_update: dict[str, Any] = field(default_factory=dict)
+    learner_diag: dict[str, Any] = field(default_factory=dict)
     router: dict[str, Any] = field(default_factory=dict)
     last_surprise: float = 0.0
     _router_context: bool = False
+    _learner_context: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -263,8 +266,17 @@ def render_llm_io(captures: Captures, agent: Any = None) -> Panel:
     """
     sections: list[Text] = []
 
-    for name, color in [("curiosity", "cyan"), ("solver", "magenta"), ("learner", "yellow"), ("router", "bright_magenta")]:
-        data = getattr(captures, name, {})
+    components = [
+        ("curiosity", "Curiosity", "cyan"),
+        ("solver", "Solver", "magenta"),
+        ("learner_update", "LearnerUpdate", "yellow"),
+        ("learner_diag", "LearnerDiag", "bright_yellow"),
+        ("router", "Router", "bright_magenta"),
+        ("learner", "Learner", "yellow"),
+    ]
+
+    for attr_name, display_name, color in components:
+        data = getattr(captures, attr_name, {})
         if not data:
             continue
 
@@ -272,7 +284,7 @@ def render_llm_io(captures: Captures, agent: Any = None) -> Panel:
         output = data.get("output", "")
 
         header = Text()
-        header.append(f"\u2500\u2500 {name.capitalize()} ", style=f"bold {color}")
+        header.append(f"\u2500\u2500 {display_name} ", style=f"bold {color}")
 
         # Show key prompt context on the header line
         if prompt:
@@ -389,7 +401,14 @@ def instrument_agent(agent: Any, captures: Captures) -> None:
 
         def make_wrapper(comp_name: str, orig: Any) -> Any:
             def wrapper(prompt: str, *args: Any, **kwargs: Any) -> str:
-                target = "router" if (comp_name == "curiosity" and captures._router_context) else comp_name
+                target = comp_name
+                if comp_name == "curiosity" and captures._router_context:
+                    target = "router"
+                elif comp_name == "learner":
+                    if captures._learner_context == "learner_update":
+                        target = "learner_update"
+                    elif captures._learner_context == "learner_diag":
+                        target = "learner_diag"
                 cap = {"prompt": prompt, "output": None}
                 setattr(captures, target, cap)
                 result = orig(prompt, *args, **kwargs)
@@ -412,6 +431,43 @@ def instrument_agent(agent: Any, captures: Captures) -> None:
                 captures._router_context = False
 
         agent.curiosity.propose_mode = mode_wrapper
+
+    # Wrap learner entrypoints so update and diagnosis appear in separate panels.
+    if hasattr(agent.learner, "update"):
+        orig_update = agent.learner.update
+
+        def learner_update_wrapper(*args: Any, **kwargs: Any) -> Any:
+            captures._learner_context = "learner_update"
+            try:
+                return orig_update(*args, **kwargs)
+            finally:
+                captures._learner_context = None
+
+        agent.learner.update = learner_update_wrapper
+
+    if hasattr(agent.learner, "assess_expectation"):
+        orig_assess = agent.learner.assess_expectation
+
+        def learner_assess_wrapper(*args: Any, **kwargs: Any) -> Any:
+            captures._learner_context = "learner_diag"
+            try:
+                return orig_assess(*args, **kwargs)
+            finally:
+                captures._learner_context = None
+
+        agent.learner.assess_expectation = learner_assess_wrapper
+
+    if hasattr(agent.learner, "diagnose"):
+        orig_diagnose = agent.learner.diagnose
+
+        def learner_diagnose_wrapper(*args: Any, **kwargs: Any) -> Any:
+            captures._learner_context = "learner_diag"
+            try:
+                return orig_diagnose(*args, **kwargs)
+            finally:
+                captures._learner_context = None
+
+        agent.learner.diagnose = learner_diagnose_wrapper
 
     # Capture surprise scores
     if hasattr(agent, "surprise") and hasattr(agent.surprise, "compute"):
@@ -513,7 +569,11 @@ def run(
                 prediction=agent._last_prediction,
                 surprise=captures.last_surprise,
                 learner_changed=(len(agent.memory) != mem_size_before),
-                learner_output=captures.learner.get("output", "") if captures.learner else "",
+                learner_output=(
+                    captures.learner_update.get("output", "")
+                    if captures.learner_update
+                    else captures.learner.get("output", "") if captures.learner else ""
+                ),
                 memory_size_before=mem_size_before,
                 memory_size_after=len(agent.memory),
                 game_state=frame_after.state.name if frame_after else "?",
