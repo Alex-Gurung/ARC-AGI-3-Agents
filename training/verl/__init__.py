@@ -7,6 +7,7 @@ from .grouped_branching import (
     GroupedBranchingEngine,
 )
 from .memory_curriculum import MemoryCurriculum, MemoryCurriculumConfig
+from .online_grpo_ls20 import OnlineConfig, run_online
 from .rewards import (
     CuriosityRewardConfig,
     LearnerRewardConfig,
@@ -29,6 +30,8 @@ __all__ = [
     "GroupedBranchingEngine",
     "MemoryCurriculum",
     "MemoryCurriculumConfig",
+    "OnlineConfig",
+    "run_online",
     "CuriosityRewardConfig",
     "LearnerRewardConfig",
     "SolverRewardConfig",

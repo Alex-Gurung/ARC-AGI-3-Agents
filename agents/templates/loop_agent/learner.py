@@ -38,6 +38,11 @@ CRITICAL EVIDENCE RULE:
 - Every lesson must include explicit evidence in the justification after "|".
   Write what changed and why that supports the claim.
   Good evidence phrases: "DIFF shows ...", "BEFORE/AFTER changed ...", "observed in N attempts".
+DESCRIPTIVE DETAIL:
+- Each entry should be detailed enough that someone reading ONLY the memory could reconstruct what the game looks like and how it behaves.
+- In the content, describe the visual/spatial effect: mention colors, positions, directions, and what the grid looks like after the change.
+- In the justification, describe what you actually saw change: which cells moved, what colors appeared/disappeared, spatial relationships that shifted.
+- Aim for ~20-30 words per side of the "|". Terse entries like "ACTION1 moves player up" are too vague — prefer "ACTION1 shifts the blue object (color 3) upward by 1 row, leaving its previous cell empty (black/0)".
 CONFIDENCE IS REQUIRED on every ADD and MODIFY — always include (0.xx) at the end.
 Low confidence is encouraged — write early hypotheses at 0.3 or 0.4 and MODIFY to increase later as evidence builds. Calibration:
 - 0.20-0.50: early hypothesis from 1 observation or weak evidence. This is fine and expected.
@@ -87,18 +92,18 @@ Compare PREDICTION with AFTER/DIFF. Did the outcome match? Did this reveal somet
 If ACTION is one of MISSING_ACTION_LESSONS, prioritize adding/updating an ACTION lesson for it with evidence.
 
 You may output MULTIPLE operations (one per line). Formats:
-ADD [TYPE] what we learned | why we think this (confidence 0-1)
-MODIFY [n] corrected belief | why the correction (confidence 0-1)
+ADD [TYPE] detailed lesson with visual/spatial description (~20-30 words) | specific evidence describing what changed on the grid (~20-30 words) (confidence 0-1)
+MODIFY [n] corrected belief with visual detail | specific evidence for the correction (confidence 0-1)
 REMOVE [n] | why this entry is wrong or redundant
 NONE
 
-Examples from another game:
-- ADD [ACTION] ACTION1 moves the controllable object up by 1 cell unless blocked | DIFF shows position moved up in 2 attempts (0.65)
-- ADD [RULE] Contact with dark cells prevents movement | BEFORE/AFTER shows no movement when adjacent to dark cells (0.7)
-- ADD [VOCAB] Color 9 appears to be the controllable object | this region moves after actions while others stay fixed (0.6)
-- ADD [GOAL] Hypothesis: level may end when the controllable object touches the border target | one attempt ended after contact, needs confirmation (0.4)
-- MODIFY [3] ACTION1 does not always move up; blocked near obstacles | DIFF shows no movement in blocked position (0.6)
-- REMOVE [5] | contradicted by latest BEFORE/AFTER transition
+Examples from another game (notice the descriptive detail — each entry paints a picture of what the grid looks like):
+- ADD [ACTION] ACTION1 shifts the blue square (color 3) upward by 1 row, leaving its old cell empty (black/0); blocked if a dark wall (color 5) is directly above | DIFF shows the blue cell at row 6 col 2 disappeared and reappeared at row 5 col 2 in 2 consecutive attempts; dark cell at row 4 col 2 prevented further upward movement (0.65)
+- ADD [RULE] Dark grey cells (color 5) forming the border walls are impassable — movement actions have no effect when the player is adjacent to them in the movement direction | BEFORE/AFTER grids were identical across 3 attempts where blue object tried to move into color-5 cells at the grid boundary (0.7)
+- ADD [VOCAB] Color 9 (bright red) is the player-controlled object — a single cell that responds to movement actions; color 5 (dark grey) forms static walls; color 0 (black) is empty traversable space | the red cell is the only region that changes position after actions while all other colored regions remain fixed across 4 observations (0.6)
+- ADD [GOAL] Hypothesis: level completes when the red player (color 9) reaches the green cell (color 4) on the right border — possibly a target or exit | one attempt ended immediately after the red cell moved adjacent to the green cell, but needs more confirmation (0.4)
+- MODIFY [3] ACTION1 shifts blue object up by 1 row in open space, but is blocked when a dark wall (color 5) or grid edge is directly above — not a universal upward move | DIFF showed zero cell changes when blue object was at row 1 (top edge) and again when color-5 wall was directly above (0.6)
+- REMOVE [5] | contradicted: latest BEFORE/AFTER shows the object passed through what we thought was a wall, so the blocking rule was wrong
 - NONE
 
 Do not copy the example wording. Use these as format-only references and ground your output in the current BEFORE/AFTER/DIFF evidence.

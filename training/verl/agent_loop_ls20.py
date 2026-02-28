@@ -12,7 +12,7 @@ import hashlib
 import json
 import logging
 import os
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -29,7 +29,7 @@ from training.verl.grouped_branching import (
     GroupedBranchingEngine,
 )
 from training.verl.memory_curriculum import MemoryCurriculum
-from training.verl.rewards import curiosity_reward
+from training.verl.rewards import curiosity_reward, learner_reward, solver_reward
 from training.verl.trajectory_schema import (
     CandidateDecision,
     DecisionRecord,
@@ -56,11 +56,15 @@ class CandidateEvalContext:
     sample: CandidateSample
     agent: LoopAgent
     frame_after: FrameData
-    action_event: SerializedAction
+    action_events: list[SerializedAction]
     semantic_report: str
     surprise_metrics: SurpriseMetrics
     changed_cells: int
     level_delta: int
+    boundary_type: str
+    steps_used: int
+    learner_group: list[CandidateSample] = field(default_factory=list)
+    learner_selected_index: int = 0
 
 
 class LS20GroupedRunner:
@@ -95,6 +99,21 @@ class LS20GroupedRunner:
         base_memory: Memory | None = None,
     ) -> EpisodeRecord:
         """Run one grouped rollout attempt and append JSONL decisions."""
+        episode, _ = self.run_attempt_with_memory(
+            attempt_id=attempt_id,
+            output_jsonl=output_jsonl,
+            base_memory=base_memory,
+        )
+        return episode
+
+    def run_attempt_with_memory(
+        self,
+        *,
+        attempt_id: str,
+        output_jsonl: Path,
+        base_memory: Memory | None = None,
+    ) -> tuple[EpisodeRecord, Memory]:
+        """Run one grouped rollout attempt and return final canonical memory."""
         canonical_actions: list[SerializedAction] = []
         initial_memory, memory_mode = self.memory_curriculum.initialize(
             base_memory=base_memory,
@@ -106,8 +125,10 @@ class LS20GroupedRunner:
         )
         decision_records: list[DecisionRecord] = []
         running_return = 0.0
+        decision_step = 0
+        action_steps_used = 0
 
-        for step in range(self.max_steps):
+        while action_steps_used < self.max_steps:
             latest_frame = canonical._convert_raw_frame_data(
                 canonical.arc_env.observation_space if canonical.arc_env else None
             )
@@ -119,12 +140,10 @@ class LS20GroupedRunner:
             candidates: list[CandidateEvalContext] = []
 
             for idx in range(k):
-                replica = self._new_agent_with_replay(
+                candidate = self._evaluate_one_step_candidate(
+                    module=module,
                     replay_actions=canonical_actions,
                     memory_override=canonical.memory,
-                )
-                candidate = self._evaluate_one_step_candidate(
-                    agent=replica,
                     candidate_id=f"{module}_{idx}",
                 )
                 candidates.append(candidate)
@@ -134,12 +153,17 @@ class LS20GroupedRunner:
             selected_index = self.branching.select_index(branch_samples)
             selected = candidates[selected_index]
             canonical = selected.agent
-            canonical_actions.append(selected.action_event)
+            if selected.action_events:
+                canonical_actions.extend(selected.action_events)
+                action_steps_used += len(selected.action_events)
+            else:
+                # Safety guard against malformed candidates.
+                action_steps_used += 1
             running_return += selected.sample.reward
 
             record = self._build_decision_record(
                 attempt_id=attempt_id,
-                step=step,
+                step=decision_step,
                 module=module,
                 selected_index=selected_index,
                 candidates=candidates,
@@ -147,6 +171,7 @@ class LS20GroupedRunner:
             )
             decision_records.append(record)
             self._append_jsonl(output_jsonl, record.to_dict())
+            decision_step += 1
 
             if selected.frame_after.state in (GameState.WIN, GameState.GAME_OVER):
                 break
@@ -155,7 +180,7 @@ class LS20GroupedRunner:
         episode = EpisodeRecord(
             episode_id=f"{attempt_id}_episode",
             game_id=self.game_id,
-            total_steps=len(canonical_actions),
+            total_steps=action_steps_used,
             done=final_frame.state in (GameState.WIN, GameState.GAME_OVER),
             game_state=final_frame.state.name,
             levels_completed=final_frame.levels_completed,
@@ -167,7 +192,7 @@ class LS20GroupedRunner:
             },
         )
         self._append_jsonl(output_jsonl, {"episode_summary": episode.to_dict()})
-        return episode
+        return episode, self._clone_memory(canonical.memory)
 
     def _new_agent_with_replay(
         self,
@@ -214,48 +239,219 @@ class LS20GroupedRunner:
     def _evaluate_one_step_candidate(
         self,
         *,
-        agent: LoopAgent,
+        module: str,
+        replay_actions: list[SerializedAction],
+        memory_override: Memory,
         candidate_id: str,
     ) -> CandidateEvalContext:
+        """Evaluate one top-level action candidate + grouped learner boundary."""
+        agent = self._new_agent_with_replay(
+            replay_actions=replay_actions,
+            memory_override=memory_override,
+        )
         latest_frame = agent._convert_raw_frame_data(
             agent.arc_env.observation_space if agent.arc_env else None
         )
         state_before = agent.state_encoder.encode(latest_frame)
-        grid_before = latest_frame.frame[-1] if latest_frame.frame else []
-        image_before = agent._grid_image_data_url(grid_before)
+        _ = latest_frame.frame[-1] if latest_frame.frame else []
 
         action = agent.runtime.step_decide(
             frames=agent.frames,
             latest_frame=latest_frame,
             state_before=state_before,
-            grid_before=grid_before,
+            grid_before=_,
         )
-        frame_after = agent.take_action(action)
-        if frame_after is None:
-            # invalid step fallback
-            frame_after = latest_frame
-        else:
-            agent.append_frame(frame_after)
+        action_event = self._serialize_action(action)
+        boundary_level_hint = (
+            str(agent._subgoal_sequence_level)
+            if agent._subgoal_sequence_active
+            else self._mode_to_boundary_level(agent.current_mode.value)
+        )
 
-        agent.runtime.step_observe(
-            state_before=state_before,
-            grid_before=grid_before,
-            action=action,
-            frame_after=frame_after,
+        learner_candidates, learner_selected_index = self._evaluate_learner_group(
+            replay_actions=replay_actions,
+            memory_override=memory_override,
+            action_event=action_event,
+            mode_hint=agent.current_mode.value,
+            boundary_level_hint=boundary_level_hint,
         )
-        agent.action_counter += 1
+        if learner_candidates:
+            selected = learner_candidates[learner_selected_index]
+        else:
+            # Safety fallback: evaluate once without grouping.
+            selected = self._evaluate_single_learner_candidate(
+                replay_actions=replay_actions,
+                memory_override=memory_override,
+                action_event=action_event,
+                mode_hint=agent.current_mode.value,
+                candidate_id=f"{candidate_id}_learner_fallback",
+                boundary_level_hint=boundary_level_hint,
+            )
+
+        reward = self._module_reward(
+            module=module,
+            boundary_type=str(selected.metadata.get("boundary_type", "action")),
+            surprise_signal=float(selected.metadata.get("surprise_signal", 0.0)),
+            changed_cells=int(selected.metadata.get("changed_cells", 0)),
+            level_delta=int(selected.metadata.get("level_delta", 0)),
+            frame_state=str(selected.metadata.get("game_state", "NOT_FINISHED")),
+            steps_used=max(1, int(selected.metadata.get("steps_used", 1))),
+        )
+
+        sample = CandidateSample(
+            candidate_id=candidate_id,
+            output=action.name,
+            reward=reward,
+            metadata={
+                "action_name": action.name,
+                "state_before_hash": selected.metadata.get("state_before_hash", "unknown"),
+                "state_after_hash": selected.metadata.get("state_after_hash", "unknown"),
+                "changed_cells": int(selected.metadata.get("changed_cells", 0)),
+                "level_delta": int(selected.metadata.get("level_delta", 0)),
+                "mode": selected.metadata.get("mode", agent.current_mode.value),
+                "boundary_type": selected.metadata.get("boundary_type", "action"),
+                "surprise_signal": float(selected.metadata.get("surprise_signal", 0.0)),
+                "learner_selected_index": learner_selected_index,
+                "learner_rewards": [c.reward for c in learner_candidates],
+                "memory_before_count": int(selected.metadata.get("memory_before_count", 0)),
+                "memory_after_count": int(selected.metadata.get("memory_after_count", 0)),
+                "steps_used": int(selected.metadata.get("steps_used", 1)),
+            },
+        )
+        surprise_metrics = SurpriseMetrics(
+            debiased_nll=float(selected.metadata.get("debiased_nll", 0.0)),
+            self_rated_x10=float(selected.metadata.get("self_rated_x10", 0.0)),
+            reward_value=float(selected.metadata.get("bundle_reward_value", 0.0)),
+            source=str(selected.metadata.get("bundle_source", self.surprise_reward_source)),
+            mean_nll_full=float(selected.metadata.get("mean_nll_full", 0.0)),
+            mean_nll_stripped=float(selected.metadata.get("mean_nll_stripped", 0.0)),
+        )
+
+        final_agent: LoopAgent = selected.metadata["agent"]
+        final_frame: FrameData = selected.metadata["frame_after"]
+        return CandidateEvalContext(
+            sample=sample,
+            agent=final_agent,
+            frame_after=final_frame,
+            action_events=self._metadata_action_events(
+                selected.metadata.get("action_events"),
+                fallback=action_event,
+            ),
+            semantic_report=str(selected.metadata.get("semantic_report", "")),
+            surprise_metrics=surprise_metrics,
+            changed_cells=int(selected.metadata.get("changed_cells", 0)),
+            level_delta=int(selected.metadata.get("level_delta", 0)),
+            boundary_type=str(selected.metadata.get("boundary_type", "action")),
+            steps_used=max(1, int(selected.metadata.get("steps_used", 1))),
+            learner_group=learner_candidates,
+            learner_selected_index=learner_selected_index,
+        )
+
+    def _evaluate_learner_group(
+        self,
+        *,
+        replay_actions: list[SerializedAction],
+        memory_override: Memory,
+        action_event: SerializedAction,
+        mode_hint: str,
+        boundary_level_hint: str,
+    ) -> tuple[list[CandidateSample], int]:
+        """Evaluate grouped learner candidates at one boundary."""
+        k = self.branching.config.count_for_module("learner")
+        learner_candidates: list[CandidateSample] = []
+        for idx in range(k):
+            candidate = self._evaluate_single_learner_candidate(
+                replay_actions=replay_actions,
+                memory_override=memory_override,
+                action_event=action_event,
+                mode_hint=mode_hint,
+                candidate_id=f"learner_{idx}",
+                boundary_level_hint=boundary_level_hint,
+            )
+            learner_candidates.append(candidate)
+        self.branching._attach_advantages(learner_candidates)
+        selected = self.branching.select_index(learner_candidates)
+        return learner_candidates, selected
+
+    def _evaluate_single_learner_candidate(
+        self,
+        *,
+        replay_actions: list[SerializedAction],
+        memory_override: Memory,
+        action_event: SerializedAction,
+        mode_hint: str,
+        candidate_id: str,
+        boundary_level_hint: str,
+    ) -> CandidateSample:
+        """Evaluate one learner candidate by replaying prefix + one boundary."""
+        agent = self._new_agent_with_replay(
+            replay_actions=replay_actions,
+            memory_override=memory_override,
+        )
+        latest_before = agent._convert_raw_frame_data(
+            agent.arc_env.observation_space if agent.arc_env else None
+        )
+        state_before_boundary = agent.state_encoder.encode(latest_before)
+        grid_before_boundary = latest_before.frame[-1] if latest_before.frame else []
+        start_levels = latest_before.levels_completed
+        memory_before_count = len(agent.memory.entries)
+
+        action_events: list[SerializedAction] = []
+        current_frame = latest_before
+        next_action = self._deserialize_action(action_event)
+        steps_used = 0
+        frame_after = latest_before
+
+        while True:
+            step_state_before = agent.state_encoder.encode(current_frame)
+            step_grid_before = current_frame.frame[-1] if current_frame.frame else []
+            frame_candidate = agent.take_action(next_action)
+            if frame_candidate is None:
+                break
+            frame_after = frame_candidate
+            agent.append_frame(frame_after)
+            agent.runtime.step_observe(
+                state_before=step_state_before,
+                grid_before=step_grid_before,
+                action=next_action,
+                frame_after=frame_after,
+            )
+            agent.action_counter += 1
+            action_events.append(self._serialize_action(next_action))
+            steps_used += 1
+            current_frame = frame_after
+
+            if frame_after.state in (GameState.WIN, GameState.GAME_OVER):
+                break
+            if agent._pending_subgoal_actions:
+                next_action = agent._pending_subgoal_actions.pop(0)
+                continue
+            # Reached a decision boundary when no queued sequence action remains.
+            break
+
+        if not action_events:
+            # Degenerate fallback to keep schema valid.
+            action_events.append(action_event)
+            steps_used = 1
 
         grid_after = frame_after.frame[-1] if frame_after.frame else []
         state_after = agent.state_encoder.encode(frame_after)
-        diff_text = agent.state_encoder.get_diff_text(grid_before, grid_after)
-        changed_cells = agent.state_encoder.get_num_changed_cells(grid_before, grid_after)
+        diff_text = agent.state_encoder.get_diff_text(grid_before_boundary, grid_after)
+        changed_cells = agent.state_encoder.get_num_changed_cells(grid_before_boundary, grid_after)
+        image_before = agent._grid_image_data_url(grid_before_boundary)
         image_after = agent._grid_image_data_url(grid_after)
-        image_diff = agent._transition_image_data_url(grid_before, grid_after)
+        image_diff = agent._transition_image_data_url(grid_before_boundary, grid_after)
+        action_trace = [evt.name for evt in action_events]
+        boundary_action_name = (
+            action_trace[0]
+            if len(action_trace) == 1
+            else f"SUBGOAL_SEQ[{', '.join(action_trace)}]"
+        )
 
         learner: Learner = agent.learner
         semantic_report = learner.generate_semantic_transition_report(
-            state_before=state_before,
-            action_taken=action.name,
+            state_before=state_before_boundary,
+            action_taken=boundary_action_name,
             state_after=state_after,
             diff_text=diff_text,
             memory=agent.memory,
@@ -264,12 +460,12 @@ class LS20GroupedRunner:
             image_diff_url=image_diff,
         )
         self_rated = learner.self_rate_surprise(
-            state_before=state_before,
-            action_taken=action.name,
+            state_before=state_before_boundary,
+            action_taken=boundary_action_name,
             state_after=state_after,
             diff_text=diff_text,
             memory=agent.memory,
-            mode=agent.current_mode.value,
+            mode=mode_hint,
             image_before_url=image_before,
             image_after_url=image_after,
             image_diff_url=image_diff,
@@ -280,64 +476,109 @@ class LS20GroupedRunner:
             reward_source=self.surprise_reward_source,
             self_rated_weight=self.self_rated_weight,
         )
-        bundle = surprise_engine.compute_bundle(
-            state_before=state_before,
-            action=action.name,
+        bundle_before = surprise_engine.compute_bundle(
+            state_before=state_before_boundary,
+            action=boundary_action_name,
+            memory=memory_override,
+            semantic_report=semantic_report,
+            self_rated_x10=self_rated,
+            visual_context_hint="BEFORE/AFTER/DIFF images provided in observer stage",
+        )
+        memory_after_count = len(agent.memory.entries)
+        boundary_type = boundary_level_hint if boundary_level_hint in {"action", "subgoal", "plan"} else "action"
+
+        bundle_after = surprise_engine.compute_bundle(
+            state_before=state_before_boundary,
+            action=boundary_action_name,
             memory=agent.memory,
             semantic_report=semantic_report,
             self_rated_x10=self_rated,
             visual_context_hint="BEFORE/AFTER/DIFF images provided in observer stage",
         )
+        parse_ok = bool((agent.learner.last_answer_output or "").strip())
+        contradiction_cleanup = "REMOVE" in (agent.learner.last_answer_output or "").upper()
+        learner_signal = learner_reward(
+            debiased_before=bundle_before.debiased_nll,
+            debiased_after=bundle_after.debiased_nll,
+            parse_ok=parse_ok,
+            non_duplicate=memory_after_count <= memory_before_count + 1,
+            contradiction_cleanup=contradiction_cleanup,
+        )
         if self.surprise_reward_source == "self_rated":
-            surprise_signal = bundle.self_rated_x10 / 10.0
+            surprise_signal = bundle_after.self_rated_x10 / 10.0
         elif self.surprise_reward_source == "hybrid":
             w = max(0.0, min(1.0, self.self_rated_weight))
-            surprise_signal = (1.0 - w) * bundle.debiased_nll + w * (
-                bundle.self_rated_x10 / 10.0
+            surprise_signal = (1.0 - w) * bundle_after.debiased_nll + w * (
+                bundle_after.self_rated_x10 / 10.0
             )
         else:
-            surprise_signal = bundle.debiased_nll
-        level_delta = frame_after.levels_completed - latest_frame.levels_completed
-        reward = curiosity_reward(
+            surprise_signal = bundle_after.debiased_nll
+
+        level_delta = frame_after.levels_completed - start_levels
+        metadata: dict[str, Any] = {
+            "agent": agent,
+            "frame_after": frame_after,
+            "semantic_report": semantic_report,
+            "mode": mode_hint,
+            "changed_cells": changed_cells,
+            "level_delta": level_delta,
+            "state_before_hash": self._hash_text(state_before_boundary),
+            "state_after_hash": self._hash_text(state_after),
+            "game_state": frame_after.state.name,
+            "boundary_type": boundary_type,
+            "surprise_signal": surprise_signal,
+            "debiased_nll": bundle_after.debiased_nll,
+            "self_rated_x10": bundle_after.self_rated_x10,
+            "bundle_reward_value": bundle_after.reward_value,
+            "bundle_source": surprise_engine.reward_source,
+            "mean_nll_full": bundle_after.mean_nll_full,
+            "mean_nll_stripped": bundle_after.mean_nll_stripped,
+            "memory_before_count": memory_before_count,
+            "memory_after_count": memory_after_count,
+            "steps_used": steps_used,
+            "action_events": [asdict(event) for event in action_events],
+        }
+        return CandidateSample(
+            candidate_id=candidate_id,
+            output=boundary_action_name,
+            reward=learner_signal,
+            metadata=metadata,
+        )
+
+    def _module_reward(
+        self,
+        *,
+        module: str,
+        boundary_type: str,
+        surprise_signal: float,
+        changed_cells: int,
+        level_delta: int,
+        frame_state: str,
+        steps_used: int,
+    ) -> float:
+        if module == "solver":
+            return solver_reward(
+                level_delta=level_delta,
+                is_win=frame_state == GameState.WIN.name,
+                is_game_over=frame_state == GameState.GAME_OVER.name,
+                steps_used=steps_used,
+            ) + 0.5 * surprise_signal
+        return curiosity_reward(
             surprise_reward=surprise_signal,
-            boundary_type="action",
+            boundary_type=boundary_type,
             novelty_bonus=1.0 if changed_cells > 0 else 0.0,
             transition_magnitude_bonus=float(changed_cells),
             boundary_progress_bonus=float(level_delta),
         )
-        sample = CandidateSample(
-            candidate_id=candidate_id,
-            output=action.name,
-            reward=reward,
-            metadata={
-                "action_name": action.name,
-                "state_before_hash": self._hash_text(state_before),
-                "state_after_hash": self._hash_text(state_after),
-                "changed_cells": changed_cells,
-                "level_delta": level_delta,
-                "mode": agent.current_mode.value,
-                "surprise_signal": surprise_signal,
-            },
-        )
 
-        surprise_metrics = SurpriseMetrics(
-            debiased_nll=bundle.debiased_nll,
-            self_rated_x10=bundle.self_rated_x10,
-            reward_value=bundle.reward_value,
-            source=surprise_engine.reward_source,
-            mean_nll_full=bundle.mean_nll_full,
-            mean_nll_stripped=bundle.mean_nll_stripped,
-        )
-        return CandidateEvalContext(
-            sample=sample,
-            agent=agent,
-            frame_after=frame_after,
-            action_event=self._serialize_action(action),
-            semantic_report=semantic_report,
-            surprise_metrics=surprise_metrics,
-            changed_cells=changed_cells,
-            level_delta=level_delta,
-        )
+    @staticmethod
+    def _mode_to_boundary_level(mode_value: str) -> str:
+        return {
+            DecisionMode.LEARN_ACTION.value: "action",
+            DecisionMode.LEARN_SUBGOAL.value: "subgoal",
+            DecisionMode.LEARN_PLAN.value: "plan",
+            DecisionMode.SOLVE.value: "plan",
+        }.get(mode_value, "action")
 
     def _build_decision_record(
         self,
@@ -351,6 +592,18 @@ class LS20GroupedRunner:
     ) -> DecisionRecord:
         candidate_rows: list[CandidateDecision] = []
         for c in candidates:
+            learner_group_rows = [
+                {
+                    "candidate_id": lc.candidate_id,
+                    "reward": lc.reward,
+                    "advantage": lc.advantage,
+                    "probability": lc.probability,
+                    "memory_after_count": int(lc.metadata.get("memory_after_count", 0)),
+                    "boundary_type": str(lc.metadata.get("boundary_type", "action")),
+                    "steps_used": int(lc.metadata.get("steps_used", 1)),
+                }
+                for lc in c.learner_group
+            ]
             candidate_rows.append(
                 CandidateDecision(
                     candidate_id=c.sample.candidate_id,
@@ -359,7 +612,11 @@ class LS20GroupedRunner:
                     advantage=c.sample.advantage,
                     probability=c.sample.probability,
                     surprise=c.surprise_metrics,
-                    metadata=c.sample.metadata,
+                    metadata={
+                        **c.sample.metadata,
+                        "learner_selected_index": c.learner_selected_index,
+                        "learner_group": learner_group_rows,
+                    },
                 )
             )
         mode = selected.sample.metadata.get("mode", "LEARN_ACTION")
@@ -369,14 +626,14 @@ class LS20GroupedRunner:
             episode_id=f"{attempt_id}_episode",
             attempt_id=attempt_id,
             step=step,
-            boundary_type="action",
+            boundary_type=selected.boundary_type,
             mode=str(mode),
             module=module,
             prompt_fingerprint=f"{module}:{state_before_hash}",
             state_before=state_before_hash,
             state_after=state_after_hash,
-            memory_before=f"size={len(selected.agent.memory)}",
-            memory_after=f"size={len(selected.agent.memory)}",
+            memory_before=f"size={int(selected.sample.metadata.get('memory_before_count', len(selected.agent.memory)))}",
+            memory_after=f"size={int(selected.sample.metadata.get('memory_after_count', len(selected.agent.memory)))}",
             semantic_report=selected.semantic_report,
             selected_index=selected_index,
             candidates=candidate_rows,
@@ -384,6 +641,8 @@ class LS20GroupedRunner:
                 "changed_cells": selected.changed_cells,
                 "level_delta": selected.level_delta,
                 "game_state": selected.frame_after.state.name,
+                "steps_used": selected.steps_used,
+                "action_trace": [event.name for event in selected.action_events],
             },
         )
 
@@ -431,6 +690,30 @@ class LS20GroupedRunner:
     @staticmethod
     def _hash_text(text: str) -> str:
         return hashlib.blake2b(text.encode("utf-8"), digest_size=8).hexdigest()
+
+    @staticmethod
+    def _metadata_action_events(
+        raw_events: Any,
+        *,
+        fallback: SerializedAction,
+    ) -> list[SerializedAction]:
+        if isinstance(raw_events, list) and raw_events:
+            parsed: list[SerializedAction] = []
+            for item in raw_events:
+                if isinstance(item, SerializedAction):
+                    parsed.append(item)
+                    continue
+                if isinstance(item, dict) and "name" in item:
+                    parsed.append(
+                        SerializedAction(
+                            name=str(item.get("name", fallback.name)),
+                            data=dict(item.get("data", {})),
+                            reasoning=item.get("reasoning"),
+                        )
+                    )
+            if parsed:
+                return parsed
+        return [fallback]
 
 
 def main() -> None:

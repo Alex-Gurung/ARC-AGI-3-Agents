@@ -292,20 +292,45 @@ def parse_memory_operation(text: str, current_step: int) -> dict:
         return {"op": "none"}
 
     # Try ADD — brackets optional around type, confidence optional
+    # Type may contain / (e.g. "PLAN/SUBGOAL"); we take the first part.
     add_match = re.match(
-        r"ADD\s+\[?(\w+)\]?\s+(.+?)\s*\|\s*(.+?)\s*"
+        r"ADD\s+\[?([\w/]+)\]?\s+(.+?)\s*\|\s*(.+?)\s*"
         r"(?:\(\s*(?:conf(?:idence)?\s*:\s*)?(\d*\.?\d+)\s*\))?\s*$",
         text,
         re.IGNORECASE,
     )
-    if add_match:
-        entry_type = add_match.group(1).upper()
+    if not add_match:
+        # Fallback: ADD without | separator — treat entire content as both
+        add_match = re.match(
+            r"ADD\s+\[?([\w/]+)\]?\s+(.+?)\s*"
+            r"(?:\(\s*(?:conf(?:idence)?\s*:\s*)?(\d*\.?\d+)\s*\))?\s*$",
+            text,
+            re.IGNORECASE,
+        )
+        if add_match:
+            raw_type = add_match.group(1).upper().split("/")[0]
+            content = add_match.group(2).strip()
+            confidence = float(add_match.group(3)) if add_match.group(3) else 0.5
+            confidence = max(0.0, min(1.0, confidence))
+            return {
+                "op": "add",
+                "entry": MemoryEntry(
+                    type=raw_type,
+                    content=content,
+                    justification="(no justification provided)",
+                    confidence=confidence,
+                    created_step=current_step,
+                    last_modified_step=current_step,
+                ),
+            }
+    if add_match and add_match.lastindex and add_match.lastindex >= 3:
+        raw_type = add_match.group(1).upper().split("/")[0]
         confidence = float(add_match.group(4)) if add_match.group(4) else 0.5
         confidence = max(0.0, min(1.0, confidence))
         return {
             "op": "add",
             "entry": MemoryEntry(
-                type=entry_type,
+                type=raw_type,
                 content=add_match.group(2).strip(),
                 justification=add_match.group(3).strip(),
                 confidence=confidence,
@@ -321,7 +346,28 @@ def parse_memory_operation(text: str, current_step: int) -> dict:
         text,
         re.IGNORECASE,
     )
-    if modify_match:
+    if not modify_match:
+        # Fallback: MODIFY without | separator
+        modify_match = re.match(
+            r"MODIFY\s+\[?([Mm]\d+|\d+)\]?\s+(.+?)\s*"
+            r"(?:\(\s*(?:conf(?:idence)?\s*:\s*)?(\d*\.?\d+)\s*\))?\s*$",
+            text,
+            re.IGNORECASE,
+        )
+        if modify_match:
+            confidence = float(modify_match.group(3)) if modify_match.group(3) else 0.5
+            confidence = max(0.0, min(1.0, confidence))
+            ref = modify_match.group(1)
+            index = int(ref) if ref.isdigit() else None
+            return {
+                "op": "modify",
+                "ref": ref,
+                "index": index,
+                "content": modify_match.group(2).strip(),
+                "justification": "(no justification provided)",
+                "confidence": confidence,
+            }
+    if modify_match and modify_match.lastindex and modify_match.lastindex >= 3:
         confidence = float(modify_match.group(4)) if modify_match.group(4) else 0.5
         confidence = max(0.0, min(1.0, confidence))
         ref = modify_match.group(1)

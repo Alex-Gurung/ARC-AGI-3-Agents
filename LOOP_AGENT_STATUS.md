@@ -264,6 +264,8 @@ The `LoopAgent` is now an explore-learn-exploit harness with:
   - `training/openrlhf/agent_func_ls20.py`
   - `training/openrlhf/make_ls20_dataset.py`
   - `training/openrlhf/run_grpo_ls20_1gpu.sh`
+  - `training/openrlhf/online_grpo_ls20.py`
+  - `training/openrlhf/run_online_grpo_ls20_1gpu.sh`
   - `scripts/run_openrlhf_ls20.sh`
 - veRL grouped-rollout path (parallel to OpenRLHF baseline):
   - `training/verl/agent_loop_ls20.py`
@@ -273,6 +275,8 @@ The `LoopAgent` is now an explore-learn-exploit harness with:
   - `training/verl/memory_curriculum.py`
   - `training/verl/make_ls20_dataset.py`
   - `training/verl/run_grpo_ls20_1gpu.sh`
+  - `training/verl/online_grpo_ls20.py`
+  - `training/verl/run_online_grpo_ls20_1gpu.sh`
 
 ## Memory Model
 
@@ -329,6 +333,8 @@ Training path env vars (veRL grouped rollouts):
    - carry-memory eval
    - noisy-memory stress eval
 8. Remove accidental build artifact from tracking: `arc_agi_3_agents.egg-info/`.
+9. Keep improving online on-policy loop:
+   - replace external update-command adapter with direct in-repo veRL optimizer hook.
 
 ## OpenRLHF (implemented scaffold)
 
@@ -338,6 +344,7 @@ Implemented baseline training scaffold (single GPU, `ls20`):
   - `uv run python training/openrlhf/make_ls20_dataset.py`
 - Launch script:
   - `bash training/openrlhf/run_grpo_ls20_1gpu.sh`
+  - `bash training/openrlhf/run_online_grpo_ls20_1gpu.sh`
   - or `bash scripts/run_openrlhf_ls20.sh`
 - Trainer settings:
   - `--advantage_estimator group_norm` (GRPO-style grouped advantages)
@@ -353,6 +360,8 @@ Implemented parallel veRL-oriented rollout collector for `ls20`:
   - `uv run python training/verl/make_ls20_dataset.py`
 - Grouped rollout run:
   - `bash training/verl/run_grpo_ls20_1gpu.sh`
+- Online iterative run:
+  - `bash training/verl/run_online_grpo_ls20_1gpu.sh`
 
 Current behavior:
 
@@ -361,6 +370,11 @@ Current behavior:
 - Non-selected branches are log-only.
 - Trajectory records include candidate rewards, advantages, probabilities,
   selected index, semantic transition report, and surprise metrics.
+- Online loop supports on-policy-style iterations:
+  - collect with current model
+  - GRPO update command (`VERL_GRPO_UPDATE_CMD`) required by default
+    (`REQUIRE_UPDATE_STEP=true`)
+  - continue with updated model path if provided
 
 Surprise metrics:
 
@@ -375,11 +389,15 @@ Current runner scope details:
 
 - Implemented:
   - grouped candidate evaluation with env replicas
+  - boundary-aligned top-level grouped sampling (`K_CURIOSITY`/`K_SOLVER`)
+    - action boundary = one primitive action
+    - subgoal/plan boundary = full queued sequence
+  - nested learner grouped sampling (`K_LEARNER`) per top-level boundary rollout
   - canonical-branch commit + non-selected logging
   - semantic transition reports
   - debiased NLL surprise + self-rated surprise logging
 - Not yet implemented:
-  - full boundary-aware learner/plan grouped sampling in runner
+  - explicit plan-end grouped sampling split from generic plan-boundary rollouts
   - direct veRL optimizer ingestion in-repo (collector is ready for it)
 
 ## RL Direction (next)

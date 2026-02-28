@@ -37,6 +37,36 @@ bash training/verl/run_grpo_ls20_1gpu.sh
 This currently runs grouped rollout collection with semantic surprise annotation.
 The generated JSONL is suitable for downstream GRPO-style training ingestion.
 
+## Online Loop (On-Policy Style)
+
+```bash
+bash training/verl/run_online_grpo_ls20_1gpu.sh
+```
+
+This runs iterative on-policy-style collection:
+
+1. collect rollouts using current model,
+2. (optionally) run GRPO update command,
+3. continue next iteration with updated model path.
+
+By default, the online script requires an update step (`REQUIRE_UPDATE_STEP=true`).
+Set `REQUIRE_UPDATE_STEP=false` (or pass `--allow-collector-only`) only for
+collector/debug runs.
+
+Set `VERL_GRPO_UPDATE_CMD` to enable the optimizer step. Example template:
+
+```bash
+export VERL_GRPO_UPDATE_CMD='python -m your_grpo_entry --model {model} --rollouts {rollout_jsonl} --out {iteration_dir}'
+```
+
+Available template placeholders:
+
+- `{model}`: current policy path/name
+- `{rollout_jsonl}` (alias `{rollouts}`): collected rollout file for the iteration
+- `{output_dir}`: online run root directory
+- `{iteration_dir}`: per-iteration directory (`{output_dir}/iter_xxxx`)
+- `{iteration}`: iteration index
+
 ## Flow (Current Runner)
 
 Per attempt (`training/verl/agent_loop_ls20.py`):
@@ -44,22 +74,27 @@ Per attempt (`training/verl/agent_loop_ls20.py`):
 1. Initialize memory using curriculum:
    - `carry` / `noisy` / `blank` (probabilities configurable).
 2. Start canonical env state for `ls20`.
-3. For each step up to `max_steps`:
+3. While canonical action budget (`max_steps`) is not exhausted:
    - Determine active module (`curiosity` unless mode is `SOLVE`, then `solver`).
-   - Build `K` candidates (`K_CURIOSITY` or `K_SOLVER`) using env replicas:
+   - Build top-level `K` candidates (`K_CURIOSITY` or `K_SOLVER`) using env replicas.
+   - Each top-level candidate executes from current state to the next boundary:
+     - action boundary (single primitive action), or
+     - subgoal/plan boundary (entire queued subgoal sequence).
+   - For each top-level boundary rollout, run nested learner group (`K_LEARNER`)
+     and select one learner outcome by within-group softmax.
+   - For selected learner branch, compute semantic surprise metrics:
      - Replay canonical prefix into each replica.
-     - Evaluate one candidate action on each replica.
-     - Produce semantic transition report (model observer).
-     - Compute surprise metrics:
+     - Produce semantic transition report (model observer) on boundary transition.
        - `mean_nll_full(report | before+action+memory)`
        - `mean_nll_stripped(report | before+memory)`
        - `debiased_nll = full - stripped`
        - optional `self_rated_x10`
-     - Compute reward.
+   - Compute module-local reward for that boundary.
    - Group-normalize rewards -> advantages -> softmax probabilities.
    - Sample selected index.
    - Commit selected branch only to canonical trajectory.
-   - Log decision row (all candidates + selected branch).
+   - Log decision row (all top candidates + nested learner group stats + selected branch).
+   - Advance canonical action budget by selected branch action-trace length.
 4. Emit episode summary row.
 
 ## Key Environment Variables
@@ -98,19 +133,19 @@ Reward source is configurable:
 
 ## Scope Gaps (Next)
 
-1. Add boundary-specific branching for learner and explicit subgoal/plan boundaries
-   in the runner (current runner is action-step grouped decisions only).
+1. Add module-aligned grouped sampling for explicit plan-end decisions.
 2. Integrate the grouped rollout JSONL into end-to-end veRL GRPO optimization.
 3. Add evaluator scripts for correlation:
    - `debiased_nll` vs `self_rated_x10`.
 4. Add distributed multi-attempt orchestration and checkpointed memory pools.
+5. Replace update-command adapter with direct in-repo veRL trainer integration.
 
 ## Current Limitations (Important)
 
 1. This path is currently a grouped **rollout collector**, not a full in-repo
    veRL optimizer training loop.
-2. Grouped branching is currently action-step driven in the runner; explicit
-   learner-boundary and plan-boundary grouped updates are next.
+2. Plan-end grouped decisions are not yet split from generic plan-boundary
+   sequence boundaries.
 3. Debiased NLL scoring currently uses text forced-completion over semantic
    reports; the scoring pass itself is not directly image-token likelihood.
 4. Canonical memory carry across attempts is available via `base_memory`, but
