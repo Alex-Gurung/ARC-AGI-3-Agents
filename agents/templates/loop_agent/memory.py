@@ -9,20 +9,16 @@ import logging
 import random
 import re
 from dataclasses import dataclass, field
-from typing import Literal, Optional
+from typing import Optional
 
 logger = logging.getLogger(__name__)
-
-MemoryType = Literal["ACTION", "RULE", "GOAL", "SUBGOAL", "PLAN", "OBSERVATION", "VOCAB"]
-
-VALID_TYPES: set[str] = {"ACTION", "RULE", "GOAL", "SUBGOAL", "PLAN", "OBSERVATION", "VOCAB"}
 
 
 @dataclass
 class MemoryEntry:
     """A single entry in the agent's memory."""
 
-    type: MemoryType
+    type: str
     content: str  # what we believe
     justification: str  # why we believe it
     confidence: float  # 0-1
@@ -187,7 +183,7 @@ class Memory:
             return self.entries[index]
         return None
 
-    def get_by_type(self, entry_type: MemoryType) -> list[tuple[int, MemoryEntry]]:
+    def get_by_type(self, entry_type: str) -> list[tuple[int, MemoryEntry]]:
         """Get all entries of a specific type with their indices."""
         return [(i, e) for i, e in enumerate(self.entries) if e.type == entry_type]
 
@@ -280,10 +276,10 @@ class Memory:
 def parse_memory_operation(text: str, current_step: int) -> dict:
     """Parse LLM output into a memory operation.
 
-    Expected formats:
+    Expected formats (brackets and confidence are optional):
         ADD [TYPE] content | justification (confidence)
-        MODIFY [index] content | justification (confidence)
-        REMOVE [index] | reason
+        MODIFY index content | justification (confidence)
+        REMOVE index | reason
         NONE
 
     Returns dict with 'op' key ('add', 'modify', 'remove', 'none', 'error')
@@ -295,23 +291,21 @@ def parse_memory_operation(text: str, current_step: int) -> dict:
     if text.upper() == "NONE" or not text:
         return {"op": "none"}
 
-    # Try ADD
+    # Try ADD — brackets optional around type, confidence optional
     add_match = re.match(
-        r"ADD\s+\[(\w+)\]\s+(.+?)\s*\|\s*(.+?)\s*"
-        r"\(\s*(?:conf(?:idence)?\s*:\s*)?(\d*\.?\d+)\s*\)\s*$",
+        r"ADD\s+\[?(\w+)\]?\s+(.+?)\s*\|\s*(.+?)\s*"
+        r"(?:\(\s*(?:conf(?:idence)?\s*:\s*)?(\d*\.?\d+)\s*\))?\s*$",
         text,
         re.IGNORECASE,
     )
     if add_match:
         entry_type = add_match.group(1).upper()
-        if entry_type not in VALID_TYPES:
-            return {"op": "error", "reason": f"Invalid type: {entry_type}"}
-        confidence = float(add_match.group(4))
+        confidence = float(add_match.group(4)) if add_match.group(4) else 0.5
         confidence = max(0.0, min(1.0, confidence))
         return {
             "op": "add",
             "entry": MemoryEntry(
-                type=entry_type,  # type: ignore[arg-type]
+                type=entry_type,
                 content=add_match.group(2).strip(),
                 justification=add_match.group(3).strip(),
                 confidence=confidence,
@@ -320,35 +314,39 @@ def parse_memory_operation(text: str, current_step: int) -> dict:
             ),
         }
 
-    # Try MODIFY
+    # Try MODIFY — brackets optional, M#### or int, confidence optional
     modify_match = re.match(
-        r"MODIFY\s+\[(\d+)\]\s+(.+?)\s*\|\s*(.+?)\s*"
-        r"\(\s*(?:conf(?:idence)?\s*:\s*)?(\d*\.?\d+)\s*\)\s*$",
+        r"MODIFY\s+\[?([Mm]\d+|\d+)\]?\s+(.+?)\s*\|\s*(.+?)\s*"
+        r"(?:\(\s*(?:conf(?:idence)?\s*:\s*)?(\d*\.?\d+)\s*\))?\s*$",
         text,
         re.IGNORECASE,
     )
     if modify_match:
-        confidence = float(modify_match.group(4))
+        confidence = float(modify_match.group(4)) if modify_match.group(4) else 0.5
         confidence = max(0.0, min(1.0, confidence))
-        index = int(modify_match.group(1))
+        ref = modify_match.group(1)
+        index = int(ref) if ref.isdigit() else None
         return {
             "op": "modify",
+            "ref": ref,
             "index": index,
             "content": modify_match.group(2).strip(),
             "justification": modify_match.group(3).strip(),
             "confidence": confidence,
         }
 
-    # Try REMOVE
+    # Try REMOVE — brackets optional, M#### or int
     remove_match = re.match(
-        r"REMOVE\s+\[(\d+)\](?:\s*\|\s*(.+))?$",
+        r"REMOVE\s+\[?([Mm]\d+|\d+)\]?(?:\s*\|\s*(.+))?$",
         text,
         re.IGNORECASE,
     )
     if remove_match:
-        index = int(remove_match.group(1))
+        ref = remove_match.group(1)
+        index = int(ref) if ref.isdigit() else None
         return {
             "op": "remove",
+            "ref": ref,
             "index": index,
             "reason": (remove_match.group(2) or "").strip(),
         }
@@ -370,7 +368,7 @@ def apply_memory_operation(memory: Memory, operation: dict, current_step: int) -
 
     if op == "modify":
         return memory.modify(
-            index=operation.get("index"),
+            index=operation.get("ref", operation.get("index")),
             content=operation["content"],
             justification=operation["justification"],
             confidence=operation["confidence"],
@@ -379,7 +377,7 @@ def apply_memory_operation(memory: Memory, operation: dict, current_step: int) -
 
     if op == "remove":
         removed = memory.remove(
-            index=operation.get("index"),
+            index=operation.get("ref", operation.get("index")),
             reason=operation.get("reason", ""),
         )
         return removed is not None

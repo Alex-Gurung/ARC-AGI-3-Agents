@@ -1132,10 +1132,32 @@ class LoopAgent(Agent):
         best_score = float("-inf")
         for idx, candidate in enumerate(candidates):
             steps = candidate.get("steps", []) or []
-            score = float(len(steps))
             text = str(candidate.get("value", "")).lower()
+            if not steps:
+                score = -6.0
+            else:
+                placeholder_steps = 0
+                generic_steps = 0
+                informative_steps = 0
+                for step in steps:
+                    s = str(step).strip().lower()
+                    if re.fullmatch(r"steps?\s*\d*", s) or re.fullmatch(r"step[_\-\s]*\d+", s):
+                        placeholder_steps += 1
+                        continue
+                    tokens = re.findall(r"[a-z0-9]+", s)
+                    if len(tokens) < 3:
+                        generic_steps += 1
+                    else:
+                        informative_steps += 1
+                score = 0.0
+                score -= 4.0 * placeholder_steps
+                score -= 1.5 * generic_steps
+                score += 1.5 * informative_steps
+                score += 0.5 * len(set(str(step).strip().lower() for step in steps if str(step).strip()))
+            if re.fullmatch(r"(step[_\-\s]*\d+\s*;?\s*)+", text.strip()):
+                score -= 8.0
             if "hypothesis" in text:
-                score += 0.5
+                score += 0.25
             if score > best_score:
                 best_score = score
                 best_idx = idx
@@ -1184,7 +1206,18 @@ class LoopAgent(Agent):
                 )
             )
         if n == 1 or len(candidates) == 1:
-            return candidates[0]
+            only = candidates[0]
+            only_actions = [
+                self._action_base_name(str(a))
+                for a in only.get("actions", [])
+            ]
+            diversified = self._diversify_repetitive_sequence(
+                actions=only_actions,
+                available_actions=available_actions,
+                state_signature=state_signature,
+            )
+            only["actions"] = diversified
+            return only
 
         best_idx = 0
         best_score = float("-inf")
@@ -1198,6 +1231,14 @@ class LoopAgent(Agent):
             if not actions:
                 continue
             unique_actions = set(actions)
+            run_repeats = sum(
+                1
+                for i in range(1, len(actions))
+                if actions[i] == actions[i - 1]
+            )
+            dominant_fraction = (
+                max(actions.count(a) for a in unique_actions) / max(1, len(actions))
+            )
             score = 0.0
             score += 0.5 * len(unique_actions)
             for action_name in unique_actions:
@@ -1210,11 +1251,72 @@ class LoopAgent(Agent):
                 if action_name == "RESET":
                     score -= 2.0
             if len(unique_actions) == 1 and len(actions) >= 3:
-                score -= 1.0
+                score -= 6.0
+            score -= 0.8 * run_repeats
+            if dominant_fraction > 0.7:
+                score -= 5.0 * (dominant_fraction - 0.7) * len(actions)
             if score > best_score:
                 best_score = score
                 best_idx = idx
-        return candidates[best_idx]
+        selected = candidates[best_idx]
+        selected_actions = [
+            self._action_base_name(str(a))
+            for a in selected.get("actions", [])
+        ]
+        diversified_actions = self._diversify_repetitive_sequence(
+            actions=selected_actions,
+            available_actions=available_actions,
+            state_signature=state_signature,
+        )
+        selected["actions"] = diversified_actions
+        return selected
+
+    def _diversify_repetitive_sequence(
+        self,
+        *,
+        actions: list[str],
+        available_actions: list[str],
+        state_signature: str | None,
+    ) -> list[str]:
+        """Diversify degenerate repeated-action exploratory sequences."""
+        if len(actions) < 4:
+            return actions
+        counts = {a: actions.count(a) for a in set(actions)}
+        dominant_action = max(counts, key=counts.get)
+        dominant_fraction = counts[dominant_action] / max(1, len(actions))
+        if dominant_fraction < 0.8:
+            return actions
+
+        state_counts = (
+            self._state_action_attempt_counts.get(state_signature, {})
+            if state_signature
+            else {}
+        )
+        alternatives = [
+            a
+            for a in available_actions
+            if a not in {"RESET", dominant_action, "ACTION6"}
+        ]
+        alternatives.sort(
+            key=lambda a: (
+                state_counts.get(a, 0),
+                self._action_attempt_counts.get(a, 0),
+            )
+        )
+        if not alternatives:
+            return actions
+
+        diversified = actions[:]
+        alt_idx = 0
+        for i in range(1, len(diversified)):
+            if diversified[i] == diversified[i - 1] == dominant_action:
+                diversified[i] = alternatives[alt_idx % len(alternatives)]
+                alt_idx += 1
+
+        if len(set(diversified)) == 1:
+            diversified[0] = alternatives[0]
+
+        return diversified
 
     @staticmethod
     def _clone_memory(memory: Memory) -> Memory:
@@ -1269,6 +1371,41 @@ class LoopAgent(Agent):
                     score += 0.5
         return score
 
+    @staticmethod
+    def _estimate_changed_cells(diff_text: str) -> int:
+        """Estimate changed-cell count from DIFF text for surprise scoring."""
+        match = re.search(r"CHANGED\s*\((\d+)\s*cells?\)", diff_text, flags=re.IGNORECASE)
+        if match:
+            return max(0, int(match.group(1)))
+        if "no changes" in diff_text.lower():
+            return 0
+        return 1
+
+    def _compute_surprise_without_side_effects(
+        self,
+        *,
+        state_before: str,
+        action: str,
+        state_after: str,
+        memory: Memory,
+        num_changed_cells: int,
+    ) -> float:
+        """Compute surprise while restoring surprise history afterward."""
+        history_obj = getattr(self.surprise, "history", None)
+        saved_history = list(history_obj) if history_obj is not None else None
+        try:
+            return self.surprise.compute(
+                state_before=state_before,
+                action=action,
+                state_after=state_after,
+                memory=memory,
+                num_changed_cells=num_changed_cells,
+            )
+        finally:
+            if history_obj is not None and saved_history is not None:
+                history_obj.clear()
+                history_obj.extend(saved_history)
+
     def _learner_update_best_of_n(
         self,
         *,
@@ -1309,6 +1446,7 @@ class LoopAgent(Agent):
         original_nones = self.learner.consecutive_nones
         available_actions = self._extract_available_actions_from_text(state_after)
         before_snapshot = self._clone_memory(memory)
+        num_changed_cells = self._estimate_changed_cells(diff_text)
         candidates: list[dict[str, Any]] = []
 
         for _ in range(n):
@@ -1339,6 +1477,13 @@ class LoopAgent(Agent):
                 state_after=state_after,
                 available_actions=available_actions,
             )
+            surprise_score = self._compute_surprise_without_side_effects(
+                state_before=state_before,
+                action=action_taken,
+                state_after=state_after,
+                memory=candidate_memory,
+                num_changed_cells=num_changed_cells,
+            )
             candidates.append(
                 {
                     "memory": candidate_memory,
@@ -1346,10 +1491,21 @@ class LoopAgent(Agent):
                     "answer": answer_text,
                     "raw": raw_text,
                     "score": score,
+                    "surprise": surprise_score,
                 }
             )
 
-        best = max(candidates, key=lambda c: float(c["score"])) if candidates else None
+        best = (
+            min(
+                candidates,
+                key=lambda c: (
+                    float(c["surprise"]),
+                    -float(c["score"]),
+                ),
+            )
+            if candidates
+            else None
+        )
         if not best:
             self.learner.consecutive_nones = original_nones + 1
             return False

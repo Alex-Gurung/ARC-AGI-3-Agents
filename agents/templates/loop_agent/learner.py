@@ -36,8 +36,9 @@ CRITICAL EVIDENCE RULE:
 - If evidence is weak or ambiguous, output NONE.
 - Every lesson must include explicit evidence in the justification after "|".
   Example evidence phrases: "DIFF shows ...", "BEFORE/AFTER changed ...", "repeated over N trials".
-CONFIDENCE CALIBRATION:
-- 0.20-0.50: early hypothesis from 1 observation or weak evidence.
+CONFIDENCE IS REQUIRED on every ADD and MODIFY — always include (0.xx) at the end.
+Low confidence is encouraged — write early hypotheses at 0.3 or 0.4 and MODIFY to increase later as evidence builds. Calibration:
+- 0.20-0.50: early hypothesis from 1 observation or weak evidence. This is fine and expected.
 - 0.50-0.75: moderate evidence (repeated consistent observations).
 - 0.75-0.90: strong evidence, but still potentially falsifiable.
 - 0.90-1.00: only for directly verified outcomes (e.g., clear WIN/level-complete condition) or many repeated confirmations.

@@ -111,7 +111,7 @@ Formatting rules:
 - Strategy should progressively build semantic understanding: object identity -> interaction mechanics -> win-condition tests.
 If the route to solve is unclear, include at least one step that tests a potentially incorrect assumption.
 Briefly think step by step, then output exactly one final line:
-ANSWER: step1; step2; step3"""
+ANSWER: test touching blue switch; move red block to pink tile; test exit contact after trigger"""
 
 MODE_ROUTER_PROMPT = """\
 You are controlling which mode the agent should use next.
@@ -633,10 +633,21 @@ class Curiosity:
             lowered = cleaned.lower()
             if lowered in {"step", "step 1", "step 2", "step 3", "todo", "tbd"}:
                 continue
+            if re.fullmatch(r"steps?\s*\d*", lowered):
+                continue
+            if re.fullmatch(r"step[_\-\s]*\d+", lowered):
+                continue
             if cleaned:
                 steps.append(cleaned)
 
         if not steps and text:
+            lowered_text = text.lower().strip()
+            if (
+                re.fullmatch(r"steps?\s*\d*", lowered_text)
+                or re.fullmatch(r"step[_\-\s]*\d+", lowered_text)
+                or re.fullmatch(r"(step[_\-\s]*\d+\s*;?\s*)+", lowered_text)
+            ):
+                return []
             steps = [text]
 
         return steps[: max(1, max_steps)]
