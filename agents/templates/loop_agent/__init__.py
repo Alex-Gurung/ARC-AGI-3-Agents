@@ -1211,12 +1211,7 @@ class LoopAgent(Agent):
                 self._action_base_name(str(a))
                 for a in only.get("actions", [])
             ]
-            diversified = self._diversify_repetitive_sequence(
-                actions=only_actions,
-                available_actions=available_actions,
-                state_signature=state_signature,
-            )
-            only["actions"] = diversified
+            only["actions"] = only_actions
             return only
 
         best_idx = 0
@@ -1231,14 +1226,6 @@ class LoopAgent(Agent):
             if not actions:
                 continue
             unique_actions = set(actions)
-            run_repeats = sum(
-                1
-                for i in range(1, len(actions))
-                if actions[i] == actions[i - 1]
-            )
-            dominant_fraction = (
-                max(actions.count(a) for a in unique_actions) / max(1, len(actions))
-            )
             score = 0.0
             score += 0.5 * len(unique_actions)
             for action_name in unique_actions:
@@ -1250,11 +1237,6 @@ class LoopAgent(Agent):
                     score += 2.5
                 if action_name == "RESET":
                     score -= 2.0
-            if len(unique_actions) == 1 and len(actions) >= 3:
-                score -= 6.0
-            score -= 0.8 * run_repeats
-            if dominant_fraction > 0.7:
-                score -= 5.0 * (dominant_fraction - 0.7) * len(actions)
             if score > best_score:
                 best_score = score
                 best_idx = idx
@@ -1263,60 +1245,8 @@ class LoopAgent(Agent):
             self._action_base_name(str(a))
             for a in selected.get("actions", [])
         ]
-        diversified_actions = self._diversify_repetitive_sequence(
-            actions=selected_actions,
-            available_actions=available_actions,
-            state_signature=state_signature,
-        )
-        selected["actions"] = diversified_actions
+        selected["actions"] = selected_actions
         return selected
-
-    def _diversify_repetitive_sequence(
-        self,
-        *,
-        actions: list[str],
-        available_actions: list[str],
-        state_signature: str | None,
-    ) -> list[str]:
-        """Diversify degenerate repeated-action exploratory sequences."""
-        if len(actions) < 4:
-            return actions
-        counts = {a: actions.count(a) for a in set(actions)}
-        dominant_action = max(counts, key=counts.get)
-        dominant_fraction = counts[dominant_action] / max(1, len(actions))
-        if dominant_fraction < 0.8:
-            return actions
-
-        state_counts = (
-            self._state_action_attempt_counts.get(state_signature, {})
-            if state_signature
-            else {}
-        )
-        alternatives = [
-            a
-            for a in available_actions
-            if a not in {"RESET", dominant_action, "ACTION6"}
-        ]
-        alternatives.sort(
-            key=lambda a: (
-                state_counts.get(a, 0),
-                self._action_attempt_counts.get(a, 0),
-            )
-        )
-        if not alternatives:
-            return actions
-
-        diversified = actions[:]
-        alt_idx = 0
-        for i in range(1, len(diversified)):
-            if diversified[i] == diversified[i - 1] == dominant_action:
-                diversified[i] = alternatives[alt_idx % len(alternatives)]
-                alt_idx += 1
-
-        if len(set(diversified)) == 1:
-            diversified[0] = alternatives[0]
-
-        return diversified
 
     @staticmethod
     def _clone_memory(memory: Memory) -> Memory:
