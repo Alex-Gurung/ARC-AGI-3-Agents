@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from openai import OpenAI
 
 from agents.templates.loop_agent.learner import Learner
-from agents.templates.loop_agent.memory import Memory
+from agents.templates.loop_agent.memory import Memory, MemoryEntry
 
 VLLM_BASE_URL = os.environ.get("VLLM_BASE_URL", "http://localhost:8000/v1")
 VLLM_MODEL = os.environ.get("VLLM_MODEL", "google/gemma-3-1b-it")
@@ -251,7 +251,14 @@ def run_part2(learner: Learner) -> list[dict]:
         # Build memory
         memory = Memory(max_entries=50)
         for mtype, content, justification, conf in trans["memory_entries"]:
-            memory.add(mtype, content, justification, conf, 0)
+            memory.add(MemoryEntry(
+                type=mtype,
+                content=content,
+                justification=justification,
+                confidence=conf,
+                created_step=0,
+                last_modified_step=0,
+            ))
 
         # 1. World Model predicts
         predicted = learner.predict_outcome(
