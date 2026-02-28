@@ -265,6 +265,14 @@ The `LoopAgent` is now an explore-learn-exploit harness with:
   - `training/openrlhf/make_ls20_dataset.py`
   - `training/openrlhf/run_grpo_ls20_1gpu.sh`
   - `scripts/run_openrlhf_ls20.sh`
+- veRL grouped-rollout path (parallel to OpenRLHF baseline):
+  - `training/verl/agent_loop_ls20.py`
+  - `training/verl/grouped_branching.py`
+  - `training/verl/rewards.py`
+  - `training/verl/trajectory_schema.py`
+  - `training/verl/memory_curriculum.py`
+  - `training/verl/make_ls20_dataset.py`
+  - `training/verl/run_grpo_ls20_1gpu.sh`
 
 ## Memory Model
 
@@ -296,6 +304,17 @@ Memory remains list-based with explicit numeric indices:
 - `LEARNER_UPDATE_INTERVAL`
 - `MISMATCH_CONF_THRESHOLD`
 
+Training path env vars (veRL grouped rollouts):
+
+- `TRAIN_MODEL` (default `google/gemma-3-4b-it`)
+- `SURPRISE_REWARD_SOURCE` = `debiased_nll` | `self_rated` | `hybrid`
+- `SELF_RATED_SURPRISE_WEIGHT` (default `0.25`)
+- `SEMANTIC_REPORT_MAX_SENTENCES` (default `10`)
+- `SEMANTIC_OBSERVER_TEMPERATURE` (default `0.7`)
+- `SEMANTIC_OBSERVER_MAX_TOKENS` (default `1024`)
+- `K_CURIOSITY`, `K_LEARNER`, `K_SOLVER` (default `4/4/4`)
+- `MEMORY_INIT_CARRY_P`, `MEMORY_INIT_NOISY_P`, `MEMORY_INIT_BLANK_P`
+
 ## Known Gaps / TODOs
 
 1. Add a strict evaluation preset script (forces blank memory at new attempts and fixed deterministic settings).
@@ -326,6 +345,43 @@ Implemented baseline training scaffold (single GPU, `ls20`):
   - `--colocate_all_models` + hybrid vLLM setup
   - **do not combine** `--async_train` with `--colocate_all_models`
 
+## veRL Grouped Rollouts (implemented scaffold)
+
+Implemented parallel veRL-oriented rollout collector for `ls20`:
+
+- Dataset generation:
+  - `uv run python training/verl/make_ls20_dataset.py`
+- Grouped rollout run:
+  - `bash training/verl/run_grpo_ls20_1gpu.sh`
+
+Current behavior:
+
+- Inference loop remains single-trajectory.
+- Training loop performs boundary grouped branching and commits only selected candidates.
+- Non-selected branches are log-only.
+- Trajectory records include candidate rewards, advantages, probabilities,
+  selected index, semantic transition report, and surprise metrics.
+
+Surprise metrics:
+
+- Default reward source: `debiased_nll`
+  - `mean_nll_full(report | before+action+memory)`
+  - `mean_nll_stripped(report | before+memory)`
+  - `debiased_nll = full - stripped`
+- Self-rated signal: `SURPRISE_X10` from model (diagnostic by default; can be
+  primary/hybrid reward via `SURPRISE_REWARD_SOURCE`).
+
+Current runner scope details:
+
+- Implemented:
+  - grouped candidate evaluation with env replicas
+  - canonical-branch commit + non-selected logging
+  - semantic transition reports
+  - debiased NLL surprise + self-rated surprise logging
+- Not yet implemented:
+  - full boundary-aware learner/plan grouped sampling in runner
+  - direct veRL optimizer ingestion in-repo (collector is ready for it)
+
 ## RL Direction (next)
 
 Recommended next training approach:
@@ -334,9 +390,9 @@ Recommended next training approach:
 - Within-group normalized advantages
 - Softmax selection over candidate rewards (not uniform random)
 - Learner dense reward from predictive improvement (`delta log p`) + terminal bonus
-- Framework decision (`OpenRLHF` vs custom) can be deferred until rollout schema is frozen.
+- Bridge grouped rollout records into end-to-end veRL GRPO trainer ingestion.
 
-## Validation Snapshot (2026-02-27)
+## Validation Snapshot (2026-02-28)
 
 Passing checks:
 
@@ -346,8 +402,10 @@ Passing checks:
 - `uv run python scripts/test_surprise.py --strategy heuristic`
 - `uv run python scripts/test_full_loop.py`
 - `uv run ruff check agents/templates/loop_agent training`
+- `uv run pytest -q tests/unit/test_runtime_parity.py tests/unit/test_semantic_report_limits.py tests/unit/test_self_rated_surprise_parser.py tests/unit/test_semantic_surprise_scoring.py tests/unit/test_grouped_branching.py tests/unit/test_candidate_counts.py tests/unit/test_grouped_branching_canonical_commit.py tests/unit/test_memory_curriculum_sampling.py tests/unit/test_multimodal_payload_order.py tests/unit/test_reward_source_switch.py`
 
 Known repo-wide test blocker:
 
-- `uv run pytest -q` currently fails before execution due to missing module
-  `agents.structs` imported by `tests/conftest.py`.
+- `uv run pytest -q` still fails on legacy unit tests with upstream API drift
+  (existing `tests/unit/test_core.py` and `tests/unit/test_swarm.py` assumptions
+  no longer match current `arc_agi/arcengine` behavior).

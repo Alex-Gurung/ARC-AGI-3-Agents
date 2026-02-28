@@ -13,14 +13,27 @@ It is NOT passed to the model in prompts.
 """
 
 import logging
+import os
 from abc import ABC, abstractmethod
 from collections import deque
+from dataclasses import dataclass
 
 from openai import OpenAI
 
 from .memory import Memory
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class SurpriseBundle:
+    """Structured surprise outputs for semantic/debiased scoring."""
+
+    debiased_nll: float
+    self_rated_x10: float
+    reward_value: float
+    mean_nll_full: float = 0.0
+    mean_nll_stripped: float = 0.0
 
 
 class SurpriseStrategy(ABC):
@@ -213,6 +226,171 @@ class HeuristicSurprise(SurpriseStrategy):
         if not self.history:
             return 0.0
         return sum(self.history) / len(self.history)
+
+
+class SemanticDebiasedNLLSurprise(SurpriseStrategy):
+    """Semantic surprise with debiased mean NLL + optional self-rated source."""
+
+    def __init__(
+        self,
+        client: OpenAI,
+        model: str,
+        reward_source: str | None = None,
+        self_rated_weight: float | None = None,
+        window_size: int = 100,
+    ) -> None:
+        self.client = client
+        self.model = model
+        self.reward_source = (
+            reward_source
+            or os.environ.get("SURPRISE_REWARD_SOURCE", "debiased_nll")
+        ).strip().lower()
+        self.self_rated_weight = float(
+            self_rated_weight
+            if self_rated_weight is not None
+            else os.environ.get("SELF_RATED_SURPRISE_WEIGHT", "0.25")
+        )
+        self.debiased_history: deque[float] = deque(maxlen=window_size)
+        self.self_rated_history: deque[float] = deque(maxlen=window_size)
+        self.last_bundle: SurpriseBundle = SurpriseBundle(
+            debiased_nll=0.0,
+            self_rated_x10=0.0,
+            reward_value=0.0,
+        )
+
+    def compute(
+        self,
+        state_before: str,
+        action: str,
+        state_after: str,
+        memory: Memory,
+        num_changed_cells: int,
+    ) -> float:
+        """Compatibility API: treat state_after as semantic report fallback."""
+        del num_changed_cells
+        bundle = self.compute_bundle(
+            state_before=state_before,
+            action=action,
+            memory=memory,
+            semantic_report=state_after,
+            self_rated_x10=0.0,
+        )
+        return bundle.reward_value
+
+    def compute_bundle(
+        self,
+        *,
+        state_before: str,
+        action: str,
+        memory: Memory,
+        semantic_report: str,
+        self_rated_x10: float | None = None,
+        visual_context_hint: str = "",
+    ) -> SurpriseBundle:
+        """Compute semantic surprise bundle.
+
+        debiased_nll = mean_nll_full - mean_nll_stripped
+        """
+        memory_text = memory.to_text() if memory else "empty"
+        report = semantic_report.strip() or "No meaningful transition was observed."
+        full_prompt = (
+            f"BEFORE_STATE:\n{state_before}\n\n"
+            f"ACTION:\n{action}\n\n"
+            f"MEMORY:\n{memory_text}\n\n"
+            f"VISUAL_HINT:\n{visual_context_hint or 'none'}\n\n"
+            "TRANSITION_REPORT:\n"
+        )
+        stripped_prompt = (
+            f"BEFORE_STATE:\n{state_before}\n\n"
+            f"MEMORY:\n{memory_text}\n\n"
+            f"VISUAL_HINT:\n{visual_context_hint or 'none'}\n\n"
+            "TRANSITION_REPORT:\n"
+        )
+
+        mean_nll_full = self._mean_nll_forced_completion(
+            prompt=full_prompt,
+            forced_completion=report,
+        )
+        mean_nll_stripped = self._mean_nll_forced_completion(
+            prompt=stripped_prompt,
+            forced_completion=report,
+        )
+        debiased = mean_nll_full - mean_nll_stripped
+        self_rated = max(0.0, min(10.0, float(self_rated_x10 or 0.0)))
+
+        z_debiased = self._zscore(debiased, self.debiased_history)
+        z_self_rated = self._zscore(self_rated, self.self_rated_history)
+        self.debiased_history.append(debiased)
+        self.self_rated_history.append(self_rated)
+
+        reward_source = self.reward_source
+        if reward_source == "self_rated":
+            reward_value = z_self_rated
+        elif reward_source == "hybrid":
+            w = max(0.0, min(1.0, self.self_rated_weight))
+            reward_value = (1.0 - w) * z_debiased + w * z_self_rated
+        else:
+            reward_value = z_debiased
+
+        bundle = SurpriseBundle(
+            debiased_nll=debiased,
+            self_rated_x10=self_rated,
+            reward_value=reward_value,
+            mean_nll_full=mean_nll_full,
+            mean_nll_stripped=mean_nll_stripped,
+        )
+        self.last_bundle = bundle
+        return bundle
+
+    def _mean_nll_forced_completion(self, *, prompt: str, forced_completion: str) -> float:
+        """Return per-token mean NLL for forced completion using completions API."""
+        try:
+            prompt_only = self.client.completions.create(
+                model=self.model,
+                prompt=prompt,
+                max_tokens=0,
+                echo=True,
+                logprobs=1,
+            )
+            prompt_tokens = 0
+            prompt_choice = prompt_only.choices[0]
+            if prompt_choice.logprobs and prompt_choice.logprobs.tokens:
+                prompt_tokens = len(prompt_choice.logprobs.tokens)
+
+            response = self.client.completions.create(
+                model=self.model,
+                prompt=prompt + forced_completion,
+                max_tokens=0,
+                echo=True,
+                logprobs=1,
+            )
+            choice = response.choices[0]
+            logprobs_data = choice.logprobs
+            if logprobs_data is None or logprobs_data.token_logprobs is None:
+                return 0.0
+            tokens = logprobs_data.tokens or []
+            token_logprobs = logprobs_data.token_logprobs or []
+            completion_start_idx = min(prompt_tokens, len(tokens))
+            completion_logprobs = [
+                lp for lp in token_logprobs[completion_start_idx:] if lp is not None
+            ]
+            if not completion_logprobs:
+                return 0.0
+            return -sum(completion_logprobs) / len(completion_logprobs)
+        except Exception as e:
+            logger.error("SemanticDebiasedNLLSurprise scoring failed: %s", e)
+            return 0.0
+
+    @staticmethod
+    def _zscore(value: float, history: deque[float]) -> float:
+        if not history:
+            return 0.0
+        mean = sum(history) / len(history)
+        variance = sum((x - mean) ** 2 for x in history) / max(len(history), 1)
+        std = variance**0.5
+        if std <= 1e-8:
+            return 0.0
+        return (value - mean) / std
 
 
 class LevelController:

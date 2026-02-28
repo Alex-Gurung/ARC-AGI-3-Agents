@@ -23,6 +23,7 @@ from ...tracing import trace_agent_session
 from .curiosity import Curiosity
 from .learner import Learner
 from .memory import Memory, MemoryEntry
+from .runtime import LoopRuntime
 from .solver import Solver
 from .state_encoder import StateEncoder
 from .surprise import (
@@ -96,6 +97,7 @@ class LoopAgent(Agent):
     # Noisy-memory mode controls
     NOISY_DELETE_FRACTION: float = float(os.environ.get("NOISY_DELETE_FRACTION", "0.2"))
     NOISY_CONF_JITTER: float = float(os.environ.get("NOISY_CONF_JITTER", "0.1"))
+    ACTION_HISTORY_MAX: int = int(os.environ.get("ACTION_HISTORY_MAX", "15"))
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -116,6 +118,7 @@ class LoopAgent(Agent):
             convergence_threshold=0.05,
             window_size=5,
         )
+        self.runtime = LoopRuntime(self)
 
         # Surprise strategy
         if self.SURPRISE_STRATEGY == "logprob":
@@ -169,6 +172,7 @@ class LoopAgent(Agent):
             DecisionMode.SOLVE.value: 0,
         }
         self._mode_switch_cooldown_remaining: int = 0
+        self._action_history: list[dict[str, Any]] = []
 
     @trace_agent_session
     def main(self) -> None:
@@ -187,7 +191,12 @@ class LoopAgent(Agent):
             self._current_state_text = state_before
             grid_before = latest_frame.frame[-1] if latest_frame.frame else []
 
-            action = self.choose_action(self.frames, latest_frame)
+            action = self.runtime.step_decide(
+                frames=self.frames,
+                latest_frame=latest_frame,
+                state_before=state_before,
+                grid_before=grid_before,
+            )
 
             frame_after = self.take_action(action)
             if frame_after:
@@ -199,7 +208,12 @@ class LoopAgent(Agent):
                     f"memory {len(self.memory)}, queued {len(self._pending_subgoal_actions)}, "
                     f"avg fps {self.fps}"
                 )
-                self._post_step(state_before, grid_before, action, frame_after)
+                self.runtime.step_observe(
+                    state_before=state_before,
+                    grid_before=grid_before,
+                    action=action,
+                    frame_after=frame_after,
+                )
 
             self.action_counter += 1
 
@@ -243,6 +257,14 @@ class LoopAgent(Agent):
                 self._repeat_state_streak,
                 self.STUCK_REPEAT_STATE_LIMIT,
             )
+            self._action_history.append({
+                "step": self.action_counter,
+                "action": "STUCK",
+                "changed": 0,
+                "event": "STUCK_RESET",
+            })
+            if len(self._action_history) > self.ACTION_HISTORY_MAX:
+                self._action_history.pop(0)
             self._set_mode(
                 DecisionMode.LEARN_ACTION,
                 reason="repeat-state escape",
@@ -492,6 +514,7 @@ class LoopAgent(Agent):
                     level=level,
                     subgoal_index=stage_subgoal_index,
                     image_data_url=state_image_url,
+                    action_history=self._action_history_text(),
                 )
                 action_names = sequence.get("actions", [])
                 actions = [
@@ -526,6 +549,7 @@ class LoopAgent(Agent):
             level=level,
             subgoal_index=stage_subgoal_index,
             image_data_url=state_image_url,
+            action_history=self._action_history_text(),
         )
         self._last_prediction = result.get("prediction", "")
         action_name = result.get("action", "RESET")
@@ -641,6 +665,20 @@ class LoopAgent(Agent):
         else:
             self._repeat_state_streak = 0
         self._current_state_text = None
+
+        # Record action in history ring buffer
+        event = None
+        if frame_after.state == GameState.GAME_OVER:
+            event = "GAME_OVER"
+        history_entry: dict[str, Any] = {
+            "step": self.action_counter,
+            "action": action.name,
+            "changed": num_changed,
+            "event": event,
+        }
+        self._action_history.append(history_entry)
+        if len(self._action_history) > self.ACTION_HISTORY_MAX:
+            self._action_history.pop(0)
 
     def _handle_subgoal_sequence_step(
         self,
@@ -875,6 +913,7 @@ class LoopAgent(Agent):
             ),
             missing_action_lessons=", ".join(missing_actions) if missing_actions else "none",
             semantic_discovery_status=self._semantic_discovery_status(state_text),
+            action_history=self._action_history_text(),
         )
         if result.get("type") == "plan":
             self._set_active_plan(
@@ -977,6 +1016,31 @@ class LoopAgent(Agent):
     def _phase_label(self) -> str:
         return "SOLVE" if self.current_mode == DecisionMode.SOLVE else "LEARN"
 
+    def _action_history_text(self) -> str:
+        """Format recent action history as compact text for prompts."""
+        if not self._action_history:
+            return "no actions taken yet"
+        lines: list[str] = []
+        for entry in self._action_history:
+            action = entry["action"]
+            line = f"  step {entry['step']}: {action}"
+            changed = entry.get("changed", 0)
+            if changed > 0:
+                line += f" -> {changed} cells changed"
+            elif action not in ("RESET", "LEVEL_COMPLETE", "STUCK"):
+                line += " -> no change"
+            event = entry.get("event")
+            if event == "GAME_OVER":
+                line += " [GAME_OVER: level failed, resetting]"
+            elif event == "SOFT_RESET":
+                line += " [SOFT_RESET: agent chose to reset after exploration]"
+            elif event == "LEVEL_COMPLETE":
+                line += " [LEVEL_COMPLETE: solved! advancing to next level]"
+            elif event == "STUCK_RESET":
+                line += " [STUCK: same state repeated, switching to LEARN_ACTION]"
+            lines.append(line)
+        return "\n".join(lines)
+
     @staticmethod
     def _mode_to_level(mode: DecisionMode) -> str:
         return {
@@ -1057,6 +1121,7 @@ class LoopAgent(Agent):
                     rulebook_status=rulebook_status,
                     missing_action_lessons=missing_action_lessons,
                     semantic_discovery_status=semantic_discovery_status,
+                    action_history=self._action_history_text(),
                 )
             )
         if n == 1 or len(candidates) == 1:
@@ -1127,6 +1192,7 @@ class LoopAgent(Agent):
                     rulebook_status=rulebook_status,
                     missing_action_lessons=missing_action_lessons,
                     semantic_discovery_status=semantic_discovery_status,
+                    action_history=self._action_history_text(),
                 )
             )
         if n == 1 or len(candidates) == 1:
@@ -1207,6 +1273,7 @@ class LoopAgent(Agent):
                     rulebook_status=rulebook_status,
                     missing_action_lessons=missing_action_lessons,
                     semantic_discovery_status=semantic_discovery_status,
+                    action_history=self._action_history_text(),
                 )
             )
         if n == 1 or len(candidates) == 1:
@@ -1359,6 +1426,7 @@ class LoopAgent(Agent):
         rulebook_status: str,
         missing_action_lessons: str,
     ) -> bool:
+        action_history = self._action_history_text()
         n = max(1, self.LEARNER_NUM_SAMPLES)
         if n == 1:
             return self.learner.update(
@@ -1377,6 +1445,7 @@ class LoopAgent(Agent):
                 image_diff_url=image_diff_url,
                 rulebook_status=rulebook_status,
                 missing_action_lessons=missing_action_lessons,
+                action_history=action_history,
             )
 
         original_nones = self.learner.consecutive_nones
@@ -1403,6 +1472,7 @@ class LoopAgent(Agent):
                 image_diff_url=image_diff_url,
                 rulebook_status=rulebook_status,
                 missing_action_lessons=missing_action_lessons,
+                action_history=action_history,
             )
             answer_text = self.learner.last_answer_output
             raw_text = self.learner.last_raw_output
@@ -1545,6 +1615,7 @@ class LoopAgent(Agent):
             ),
             missing_action_lessons=", ".join(missing_actions) if missing_actions else "none",
             semantic_discovery_status=self._semantic_discovery_status(state_text),
+            action_history=self._action_history_text(),
         )
         proposed_mode = str(mode_result.get("mode", self.current_mode.value)).upper()
         try:
@@ -1654,6 +1725,14 @@ class LoopAgent(Agent):
 
     def _on_full_reset(self) -> None:
         """Handle full game reset with configurable memory persistence."""
+        self._action_history.append({
+            "step": self.action_counter,
+            "action": "RESET",
+            "changed": 0,
+            "event": "GAME_OVER",
+        })
+        if len(self._action_history) > self.ACTION_HISTORY_MAX:
+            self._action_history.pop(0)
         mode = self.MEMORY_PERSISTENCE_MODE
         if mode == "strict":
             logger.info("Full reset detected — clearing memory (strict mode)")
@@ -1698,6 +1777,14 @@ class LoopAgent(Agent):
 
     def _on_soft_reset(self) -> None:
         """Handle a control-flow reset after exploratory subgoal attempts."""
+        self._action_history.append({
+            "step": self.action_counter,
+            "action": "RESET",
+            "changed": 0,
+            "event": "SOFT_RESET",
+        })
+        if len(self._action_history) > self.ACTION_HISTORY_MAX:
+            self._action_history.pop(0)
         logger.info("Soft reset detected — keeping memory/phase/level, clearing transient plan state")
         self.state_encoder.reset()
         self.state_encoder.force_keyframe_next("soft_reset")
@@ -1712,6 +1799,14 @@ class LoopAgent(Agent):
 
     def _on_level_complete(self, frame: FrameData) -> None:
         """Handle level completion — brief re-explore for new level."""
+        self._action_history.append({
+            "step": self.action_counter,
+            "action": "LEVEL_COMPLETE",
+            "changed": 0,
+            "event": "LEVEL_COMPLETE",
+        })
+        if len(self._action_history) > self.ACTION_HISTORY_MAX:
+            self._action_history.pop(0)
         logger.info(
             f"Level complete! levels_completed={frame.levels_completed}. "
             "Re-entering explore for new level."

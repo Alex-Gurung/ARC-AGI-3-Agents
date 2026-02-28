@@ -1,6 +1,8 @@
-# OpenRLHF LS20 Scaffold
+# OpenRLHF LS20 Scaffold (Baseline)
 
 This directory contains a minimal GRPO-style OpenRLHF setup for ARC-AGI-3 `ls20`.
+It is kept as a baseline/simple path alongside the richer veRL grouped-rollout
+path in `training/verl/`.
 
 ## Files
 
@@ -30,6 +32,7 @@ bash training/openrlhf/run_grpo_ls20_1gpu.sh
 - Do not combine `--async_train` with `--colocate_all_models`.
 - Vision in this scaffold is not wired into OpenRLHF actor prompts by default; it relies on text state encoding from `StateEncoder`.
 - State text includes `OBJECTS/RELATIONS` as heuristic/noisy descriptors; `GRID/DIFF` should be treated as ground truth.
+- For LoopAgent-complete grouped branching + semantic surprise rewards, use `training/verl/`.
 
 ## Common knobs
 

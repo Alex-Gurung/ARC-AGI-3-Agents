@@ -42,6 +42,9 @@ STATE:
 Use GRID/CHANGED DIFF as primary evidence.
 Treat OBJECTS/RELATIONS as helpful but possibly noisy heuristics.
 
+RECENT_ACTIONS:
+{action_history}
+
 MEMORY:
 {memory_text}
 
@@ -80,6 +83,9 @@ STATE:
 Use GRID/CHANGED DIFF as primary evidence.
 Treat OBJECTS/RELATIONS as helpful but possibly noisy heuristics.
 
+RECENT_ACTIONS:
+{action_history}
+
 MEMORY:
 {memory_text}
 
@@ -106,6 +112,9 @@ ACTION_TRY_COUNTS: {action_try_counts}
 EARLY_EXPLORATION_HINT: {early_exploration_hint}
 SEMANTIC_DISCOVERY_STATUS: {semantic_discovery_status}
 
+RECENT_ACTIONS:
+{action_history}
+
 MEMORY:
 {memory_text}
 
@@ -120,22 +129,19 @@ Briefly think step by step, then output exactly one final line:
 ANSWER: test touching blue switch; move red block to pink tile; test exit contact after trigger"""
 
 MODE_ROUTER_PROMPT = """\
-You are deciding which KNOWLEDGE GAP is the biggest bottleneck right now.
-Do NOT pick an action or plan a move — only decide what the agent still needs to learn.
+You are an agent learning to play a game. You need to decide where to focus your learning next.
+Look at what you currently know (your memory) and pick the ONE area with the biggest knowledge gap.
+Do NOT pick an action or plan a move — only decide what to learn.
 
-Modes (each targets a different knowledge gap):
-- LEARN_ACTION: we do NOT yet understand what individual actions do. Learning here will ONLY update our knowledge of individual action effects (e.g. "ACTION1 moves the player up", "ACTION3 does nothing when facing a wall").
-- LEARN_SUBGOAL: we understand individual actions but do NOT know useful multi-step sequences. Learning here will update our knowledge of small action strings that solve individual parts of a level (e.g. "move right 3 then up 2 to reach the switch", "push block into gap to create a bridge").
-- LEARN_PLAN: we understand useful sequences but do NOT know the global goals. Learning here tries to identify the overall objectives of each level and the game as a whole, and how to combine subgoals into a winning strategy.
-- SOLVE: we have enough understanding at all levels — execute our best strategy now.
+There are four modes, each targeting a different level of understanding:
+- LEARN_ACTION: learn what individual actions do (e.g. "ACTION1 moves player up", "ACTION3 does nothing at a wall")
+- LEARN_SUBGOAL: learn useful multi-step sequences that solve parts of a level (e.g. "go right 3 then up 2 to reach the switch")
+- LEARN_PLAN: learn the overall goals of each level and how to combine subgoals into a winning strategy
+- SOLVE: we have enough understanding at all levels — execute our best strategy now
 
-Decision guide:
-- Pick LEARN_ACTION if MISSING_ACTION_LESSONS lists untested actions, or memory has few/low-confidence ACTION entries.
-- Pick LEARN_SUBGOAL if actions are understood but memory has few SUBGOAL entries or subgoals keep failing.
-- Pick LEARN_PLAN if subgoals work but we lack a coherent plan, or the plan keeps failing.
-- Pick SOLVE only if memory has high-confidence entries at action, subgoal, AND plan levels.
-- When in doubt, pick the LOWEST level with weak understanding — filling low-level gaps first is more efficient.
+When in doubt, pick the LOWEST level with weak understanding — filling low-level gaps first is more efficient.
 
+Here is your current status:
 CURRENT_MODE: {current_mode}
 LAST_DIAGNOSIS_LEVEL: {last_diagnosis_level}
 LAST_PREDICTION: {last_prediction}
@@ -145,12 +151,20 @@ RULEBOOK_STATUS: {rulebook_status}
 MISSING_ACTION_LESSONS: {missing_action_lessons}
 SEMANTIC_DISCOVERY_STATUS: {semantic_discovery_status}
 
+RECENT_ACTIONS:
+{action_history}
+
 MEMORY:
 {memory_text}
 
-Think about what knowledge is MISSING or LOW-CONFIDENCE, then output exactly one final line:
-ANSWER: <LEARN_ACTION|LEARN_SUBGOAL|LEARN_PLAN|SOLVE>
-"""
+Examples of good reasoning (pick exactly one mode):
+- "Memory has no entry for ACTION2 and MISSING_ACTION_LESSONS lists it → ANSWER: LEARN_ACTION"
+- "All actions are known but we've never tried combining them to reach the exit → ANSWER: LEARN_SUBGOAL"
+- "We can reach objects but don't know what the win condition is → ANSWER: LEARN_PLAN"
+- "We have high-confidence entries at every level and a working plan → ANSWER: SOLVE"
+
+Now look at the memory and status above. Identify the weakest area, then pick exactly one mode.
+ANSWER: """
 
 EXPLORE_SUBGOAL_SEQUENCE_PROMPT = """\
 You are exploring a game and currently testing a subgoal.
@@ -169,6 +183,9 @@ STATE:
 
 Use GRID/CHANGED DIFF as primary evidence.
 Treat OBJECTS/RELATIONS as helpful but possibly noisy heuristics.
+
+RECENT_ACTIONS:
+{action_history}
 
 MEMORY:
 {memory_text}
@@ -216,6 +233,7 @@ class Curiosity:
         rulebook_status: str = "none",
         missing_action_lessons: str = "none",
         semantic_discovery_status: str = "none",
+        action_history: str = "no actions taken yet",
     ) -> dict[str, Any]:
         """Propose an exploratory action/subgoal/plan.
 
@@ -228,6 +246,7 @@ class Curiosity:
             active_plan: Current active plan text, if any.
             active_subgoal: Current active subgoal text, if any.
             subgoal_index: Active subgoal index, if any.
+            action_history: Recent action history text.
 
         Returns:
             dict with keys:
@@ -270,6 +289,7 @@ class Curiosity:
                 memory_text=memory_text,
                 low_confidence_entries=low_confidence_entries,
                 available_actions_str=available_actions_str,
+                action_history=action_history,
             )
         elif level == "subgoal":
             prompt = SUBGOAL_PROMPT.format(
@@ -287,6 +307,7 @@ class Curiosity:
                 state_text=state_text,
                 memory_text=memory_text,
                 low_confidence_entries=low_confidence_entries,
+                action_history=action_history,
             )
         elif level == "plan":
             prompt = PLAN_PROMPT.format(
@@ -302,6 +323,7 @@ class Curiosity:
                 missing_action_lessons=missing_action_lessons,
                 semantic_discovery_status=semantic_discovery_status,
                 memory_text=memory_text,
+                action_history=action_history,
             )
         else:
             logger.warning(f"Unknown level {level}, defaulting to action")
@@ -322,6 +344,7 @@ class Curiosity:
                 memory_text=memory_text,
                 low_confidence_entries=low_confidence_entries,
                 available_actions_str=available_actions_str,
+                action_history=action_history,
             )
 
         raw_output = self._call_llm(prompt, image_data_urls=[image_data_url] if image_data_url else None)
@@ -370,6 +393,7 @@ class Curiosity:
         rulebook_status: str = "none",
         missing_action_lessons: str = "none",
         semantic_discovery_status: str = "none",
+        action_history: str = "no actions taken yet",
     ) -> dict[str, Any]:
         """Choose the next top-level control mode based on knowledge gaps."""
         memory_text = memory.to_text() if memory else "empty"
@@ -383,6 +407,7 @@ class Curiosity:
             missing_action_lessons=missing_action_lessons,
             semantic_discovery_status=semantic_discovery_status,
             memory_text=memory_text,
+            action_history=action_history,
         )
         raw_output = self._call_llm(prompt)
         answer_output = self._extract_answer(raw_output)
@@ -456,6 +481,7 @@ class Curiosity:
         rulebook_status: str = "none",
         missing_action_lessons: str = "none",
         semantic_discovery_status: str = "none",
+        action_history: str = "no actions taken yet",
     ) -> dict[str, Any]:
         """Propose exploratory action sequence for a target subgoal."""
         memory_text = memory.to_text() if memory else "empty"
@@ -475,6 +501,7 @@ class Curiosity:
             active_subgoal=active_subgoal or "none",
             available_actions_str=", ".join(available_actions),
             max_steps=max_steps,
+            action_history=action_history,
         )
         raw_output = self._call_llm(prompt, image_data_urls=[image_data_url] if image_data_url else None)
         subgoal_text = self._extract_labeled_value(raw_output, "SUBGOAL") or active_subgoal

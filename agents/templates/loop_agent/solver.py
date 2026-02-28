@@ -29,6 +29,9 @@ STATE:
 Use GRID/CHANGED DIFF as primary evidence.
 Treat OBJECTS/RELATIONS as helpful but possibly noisy heuristics.
 
+RECENT_ACTIONS:
+{action_history}
+
 MEMORY:
 {memory_text}
 
@@ -56,6 +59,9 @@ STATE:
 
 Use GRID/CHANGED DIFF as primary evidence.
 Treat OBJECTS/RELATIONS as helpful but possibly noisy heuristics.
+
+RECENT_ACTIONS:
+{action_history}
 
 MEMORY:
 {memory_text}
@@ -95,6 +101,7 @@ class Solver:
         level: str = "action",
         subgoal_index: int | None = None,
         image_data_url: str | None = None,
+        action_history: str = "no actions taken yet",
     ) -> dict[str, Any]:
         """Select an action based on current knowledge.
 
@@ -105,6 +112,7 @@ class Solver:
             phase: Current high-level phase.
             level: Current abstraction level.
             subgoal_index: Active subgoal index, if any.
+            action_history: Recent action history text.
 
         Returns:
             dict with keys:
@@ -125,6 +133,7 @@ class Solver:
             active_plan=self.active_plan or "none",
             active_subgoal=self.active_subgoal or "none",
             available_actions_str=available_actions_str,
+            action_history=action_history,
         )
 
         raw_output = self._call_llm(
@@ -170,6 +179,7 @@ class Solver:
         level: str = "subgoal",
         subgoal_index: int | None = None,
         image_data_url: str | None = None,
+        action_history: str = "no actions taken yet",
     ) -> dict[str, Any]:
         """Propose a short action sequence for the active subgoal."""
         memory_text = memory.to_text() if memory else "empty"
@@ -185,6 +195,7 @@ class Solver:
             active_subgoal=self.active_subgoal or "none",
             available_actions_str=available_actions_str,
             max_steps=max_steps,
+            action_history=action_history,
         )
         raw_output = self._call_llm(
             prompt,

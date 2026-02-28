@@ -8,6 +8,7 @@ the surprise score is NOT passed to the model (it's a system-level signal).
 """
 
 import logging
+import os
 import re
 from typing import Optional
 
@@ -76,6 +77,9 @@ If images are attached, they are ordered as:
 - image2: AFTER
 - image3: VISUAL_DIFF (BEFORE|AFTER|DIFF composite)
 
+RECENT_ACTIONS:
+{action_history}
+
 MEMORY:
 {memory_text}
 
@@ -138,6 +142,69 @@ Output exactly one final line:
 ANSWER: verdict=<expected|unexpected> conf=<0.00-1.00> level=<action|subgoal|plan> ref=<index|none>
 """
 
+SEMANTIC_TRANSITION_PROMPT = """\
+You are an observer describing what changed in a game transition.
+
+You must describe only evidence-grounded changes and plausible mechanics.
+Avoid claiming level completion unless directly observed in AFTER state metadata.
+You may include uncertain hypotheses, but clearly mark uncertainty.
+Use up to {max_sentences} sentences.
+
+BEFORE:
+{state_before}
+
+ACTION:
+{action_taken}
+
+AFTER:
+{state_after}
+
+DIFF:
+{diff_text}
+
+MEMORY (rulebook; may contain wrong assumptions):
+{memory_text}
+
+If images are attached, they are ordered as:
+- image1: BEFORE
+- image2: AFTER
+- image3: VISUAL_DIFF (BEFORE|AFTER|DIFF composite)
+
+Write a thorough semantic transition report grounded in the observed change.
+Think step by step, then output exactly one final line:
+ANSWER: <semantic transition report, <= {max_sentences} sentences>
+"""
+
+SELF_RATED_SURPRISE_PROMPT = """\
+You are rating how surprising a transition was.
+
+Given EXPECTED context (before state, action, memory rulebook) and observed outcome,
+return a surprise score from 0 to 10:
+- 0 = fully expected
+- 10 = extremely unexpected
+
+MODE: {mode}
+EXPECTED_CONTEXT:
+BEFORE:
+{state_before}
+
+ACTION:
+{action_taken}
+
+MEMORY:
+{memory_text}
+
+OBSERVED_OUTCOME:
+AFTER:
+{state_after}
+
+DIFF:
+{diff_text}
+
+Think step by step, then output exactly one final line:
+ANSWER: SURPRISE_X10=<0-10>
+"""
+
 
 class Learner:
     """Updates memory based on observed state transitions."""
@@ -148,6 +215,15 @@ class Learner:
         self.consecutive_nones: int = 0  # track how many NONE ops in a row
         self.last_raw_output: str = ""
         self.last_answer_output: str = ""
+        self.semantic_report_max_sentences = int(
+            os.environ.get("SEMANTIC_REPORT_MAX_SENTENCES", "10")
+        )
+        self.semantic_observer_temperature = float(
+            os.environ.get("SEMANTIC_OBSERVER_TEMPERATURE", "0.7")
+        )
+        self.semantic_observer_max_tokens = int(
+            os.environ.get("SEMANTIC_OBSERVER_MAX_TOKENS", "1024")
+        )
 
     def update(
         self,
@@ -166,6 +242,7 @@ class Learner:
         image_diff_url: str | None = None,
         rulebook_status: str = "none",
         missing_action_lessons: str = "none",
+        action_history: str = "no actions taken yet",
     ) -> bool:
         """Observe a state transition and update memory.
 
@@ -199,6 +276,7 @@ class Learner:
             state_after=state_after,
             diff_text=diff_text,
             memory_text=memory_text,
+            action_history=action_history,
         )
 
         images = [url for url in [image_before_url, image_after_url, image_diff_url] if url]
@@ -288,6 +366,83 @@ class Learner:
         self.last_raw_output = raw_output
         self.last_answer_output = answer_output
         return self._parse_expectation_assessment(answer_output)
+
+    def generate_semantic_transition_report(
+        self,
+        *,
+        state_before: str,
+        action_taken: str,
+        state_after: str,
+        diff_text: str,
+        memory: Memory,
+        image_before_url: str | None = None,
+        image_after_url: str | None = None,
+        image_diff_url: str | None = None,
+        max_sentences: int | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> str:
+        """Generate a semantic report of transition effects.
+
+        The report is free-form but sentence-capped for reward stability.
+        """
+        memory_text = memory.to_text() if memory else "empty"
+        sentence_cap = max(1, max_sentences or self.semantic_report_max_sentences)
+        prompt = SEMANTIC_TRANSITION_PROMPT.format(
+            max_sentences=sentence_cap,
+            state_before=state_before,
+            action_taken=action_taken,
+            state_after=state_after,
+            diff_text=diff_text,
+            memory_text=memory_text,
+        )
+        images = [url for url in [image_before_url, image_after_url, image_diff_url] if url]
+        raw_output = self._call_llm(
+            prompt,
+            max_tokens=max_tokens or self.semantic_observer_max_tokens,
+            temperature=temperature if temperature is not None else self.semantic_observer_temperature,
+            image_data_urls=images or None,
+        )
+        answer_output = self._extract_answer(raw_output)
+        report = self._trim_sentences(answer_output, max_sentences=sentence_cap)
+        self.last_raw_output = raw_output
+        self.last_answer_output = report
+        return report
+
+    def self_rate_surprise(
+        self,
+        *,
+        state_before: str,
+        action_taken: str,
+        state_after: str,
+        diff_text: str,
+        memory: Memory,
+        mode: str = "action",
+        image_before_url: str | None = None,
+        image_after_url: str | None = None,
+        image_diff_url: str | None = None,
+    ) -> float:
+        """Return model self-rated surprise score in [0, 10]."""
+        memory_text = memory.to_text() if memory else "empty"
+        prompt = SELF_RATED_SURPRISE_PROMPT.format(
+            mode=mode,
+            state_before=state_before,
+            action_taken=action_taken,
+            state_after=state_after,
+            diff_text=diff_text,
+            memory_text=memory_text,
+        )
+        images = [url for url in [image_before_url, image_after_url, image_diff_url] if url]
+        raw_output = self._call_llm(
+            prompt,
+            max_tokens=128,
+            temperature=self.semantic_observer_temperature,
+            image_data_urls=images or None,
+        )
+        answer_output = self._extract_answer(raw_output)
+        self.last_raw_output = raw_output
+        self.last_answer_output = answer_output
+        return self._parse_self_rated_surprise(answer_output)
 
     def _call_llm(
         self,
@@ -474,6 +629,37 @@ class Learner:
             "entry_ref": entry_ref,
             "raw": raw_output,
         }
+
+    @staticmethod
+    def _trim_sentences(text: str, max_sentences: int) -> str:
+        """Trim output to at most max_sentences sentence-like segments."""
+        cleaned = " ".join(text.strip().split())
+        if not cleaned:
+            return ""
+        # Keep punctuation boundaries while handling newlines.
+        parts = re.split(r"(?<=[.!?])\s+", cleaned)
+        if len(parts) <= max_sentences:
+            return cleaned
+        return " ".join(parts[:max_sentences]).strip()
+
+    @staticmethod
+    def _parse_self_rated_surprise(raw_output: str) -> float:
+        """Parse surprise score in [0, 10] from model output."""
+        text = raw_output.strip()
+        match = re.search(
+            r"(?:SURPRISE_X10|SURPRISE|X10)\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            # Fallback: first numeric token.
+            fallback = re.search(r"([0-9]+(?:\.[0-9]+)?)", text)
+            if not fallback:
+                return 0.0
+            value = float(fallback.group(1))
+        else:
+            value = float(match.group(1))
+        return max(0.0, min(10.0, value))
 
     @property
     def memory_is_stable(self) -> bool:
