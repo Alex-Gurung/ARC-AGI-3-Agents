@@ -254,8 +254,8 @@ class Learner:
     def _call_llm(
         self,
         prompt: str,
-        max_tokens: int = 512,
-        temperature: float = 0.3,
+        max_tokens: int = 1024,
+        temperature: float = 1.0,
     ) -> str:
         """Call the LLM with a single prompt."""
         try:

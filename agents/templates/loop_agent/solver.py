@@ -172,7 +172,7 @@ class Solver:
             available_actions_str=available_actions_str,
             max_steps=max_steps,
         )
-        raw_output = self._call_llm(prompt, max_tokens=192, temperature=0.3)
+        raw_output = self._call_llm(prompt)
         answer_output = self._extract_answer(raw_output)
         prediction = self._extract_expected(raw_output)
         actions = self._parse_subgoal_actions(answer_output, available_actions, max_steps)
@@ -196,8 +196,8 @@ class Solver:
     def _call_llm(
         self,
         prompt: str,
-        max_tokens: int = 64,
-        temperature: float = 0.2,
+        max_tokens: int = 1024,
+        temperature: float = 1.0,
     ) -> str:
         """Call the LLM with a single prompt."""
         try:
