@@ -35,7 +35,8 @@ CRITICAL EVIDENCE RULE:
 - Only add/modify lessons when there is direct evidence in BEFORE/AFTER/DIFF.
 - If evidence is weak or ambiguous, output NONE.
 - Every lesson must include explicit evidence in the justification after "|".
-  Example evidence phrases: "DIFF shows ...", "BEFORE/AFTER changed ...", "repeated over N trials".
+  Write what changed and why that supports the claim.
+  Good evidence phrases: "DIFF shows ...", "BEFORE/AFTER changed ...", "observed in N attempts".
 CONFIDENCE IS REQUIRED on every ADD and MODIFY — always include (0.xx) at the end.
 Low confidence is encouraged — write early hypotheses at 0.3 or 0.4 and MODIFY to increase later as evidence builds. Calibration:
 - 0.20-0.50: early hypothesis from 1 observation or weak evidence. This is fine and expected.
@@ -80,21 +81,16 @@ MODIFY [n] corrected belief | why the correction (confidence 0-1)
 REMOVE [n] | why this entry is wrong or redundant
 NONE
 
-Examples:
-- ADD [RULE] Black cells (5) block movement | tried moving into them twice with no effect (0.7)
-- ADD [GOAL] Win seems to require touching the yellow border with the player | level ended when contact happened (0.6)
-- ADD [VOCAB] Color 11 = exit door border | touching it completed the level (0.9)
-- ADD [ACTION] ACTION4 moves player right by 1 unless blocked by black cells | observed over 4 trials (0.8)
-- ADD [ACTION] ACTION2 shifts the wave right by one cell | DIFF shows 0->9 at (x+1,y) and 9->0 at (x,y) across 3 trials (0.85)
-- MODIFY [3] Energy decreases by 2 per move, not 1 | counted more carefully (0.6)
-- REMOVE [5] | duplicate of [2]
-- REMOVE [8] | contradicted when ACTION3 moved us right, not left
-- ADD [SUBGOAL] Reaching the blue switch flips the right gate open | after 2 tries, gate changed only when switch was touched (0.7)
-- ADD [PLAN] Safe route appears to be: align key color first, then touch door border | direct door attempt caused GAME_OVER twice (0.65)
-- ADD [GOAL] Hypothesis: level completes when black square touches yellow square | completion followed contact event while score/state changed (0.55)
-- ADD [GOAL] Hypothesis: level completes when matching both shape and color on the right side | not yet verified by level completion; observed partial progress only (0.45)
+Examples from another game:
+- ADD [ACTION] ACTION1 moves the controllable object up by 1 cell unless blocked | DIFF shows position moved up in 2 attempts (0.65)
+- ADD [RULE] Contact with dark cells prevents movement | BEFORE/AFTER shows no movement when adjacent to dark cells (0.7)
+- ADD [VOCAB] Color 9 appears to be the controllable object | this region moves after actions while others stay fixed (0.6)
+- ADD [GOAL] Hypothesis: level may end when the controllable object touches the border target | one attempt ended after contact, needs confirmation (0.4)
+- MODIFY [3] ACTION1 does not always move up; blocked near obstacles | DIFF shows no movement in blocked position (0.6)
+- REMOVE [5] | contradicted by latest BEFORE/AFTER transition
 - NONE
 
+Do not copy the example wording. Use these as format-only references and ground your output in the current BEFORE/AFTER/DIFF evidence.
 Think step by step, then output ONLY operations (no rationale/prose labels).
 ANSWER:
 <one or more operations, one per line>"""
@@ -111,7 +107,7 @@ MEMORY:
 Which level of our understanding was wrong?
 - action: an action did something different than we recorded
 - subgoal: a subgoal had an unexpected outcome or was impossible
-- plan: our overall strategy is flawed or incomplete
+- plan: our overall strategy to win the game is flawed or incomplete
 
 Which specific memory entry (by index) is most likely wrong?
 
