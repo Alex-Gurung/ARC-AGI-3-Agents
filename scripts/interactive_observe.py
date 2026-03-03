@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import time
 
 from dotenv import load_dotenv
 
@@ -27,6 +28,8 @@ load_dotenv(dotenv_path=".env", override=True)
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from arc_agi import Arcade
+from arcengine import GameAction
 from openai import OpenAI
 
 from agents.templates.loop_agent.learner import Learner
@@ -93,13 +96,15 @@ def main() -> None:
         help="Number of images to send: 0=text only, 1=AFTER only, "
              "2=BEFORE+AFTER (default), 3=BEFORE+AFTER+composite",
     )
+    parser.add_argument(
+        "--no-objects", action="store_true",
+        help="Strip OBJECTS/RELATIONS from state text sent to all prompts",
+    )
     args = parser.parse_args()
 
     cell_sizes = args.cell_sizes or [16]
     num_images = args.images
-
-    from arc_agi import Arcade
-    from arcengine import GameAction
+    strip_obj = Learner._strip_objects if args.no_objects else lambda s: s
 
     # Setup
     client = OpenAI(base_url=VLLM_BASE_URL, api_key=VLLM_API_KEY)
@@ -111,12 +116,14 @@ def main() -> None:
     print(f"{BOLD}Game:{RESET} {args.game}")
     if len(cell_sizes) > 1:
         print(f"{BOLD}Cell sizes:{RESET} {cell_sizes}")
-    print(f"{DIM}Controls: 1-5 = ACTION1-5, 0/r = RESET, q = quit{RESET}\n")
+    print(f"{DIM}Controls: 1-5 = ACTION1-5, 0/r = RESET, q = quit{RESET}")
 
     # Connect
+    t0 = time.time()
     arcade = Arcade()
     card_id = arcade.open_scorecard(tags=["interactive_observe"])
     env = arcade.make(args.game, scorecard_id=card_id)
+    print(f"{DIM}Game connected in {time.time() - t0:.1f}s{RESET}\n")
 
     raw = env.reset()
     if raw is None:
@@ -179,7 +186,7 @@ def main() -> None:
             px_w, px_h = grid_w * wm_cell_size, grid_h * wm_cell_size
             print(f"\n{YELLOW}{BOLD}World Model predicts (cell_size={wm_cell_size}, {px_w}x{px_h}px):{RESET}")
             predicted = learner.predict_outcome(
-                state_before=state_before,
+                state_before=strip_obj(state_before),
                 action_taken=action.name,
                 memory=memory,
                 image_before_url=img_before_wm,
@@ -220,32 +227,38 @@ def main() -> None:
         grid_w = len(grid[0]) if grid else 0
         observer_results = []
 
-        for cs in cell_sizes:
-            px_w, px_h = grid_w * cs, grid_h * cs
-            # 0=none, 1=AFTER only, 2=BEFORE+AFTER, 3=BEFORE+AFTER+composite
-            img_before = encoder.grid_to_image_data_url(grid_before, cell_size=cs) if num_images >= 2 else None
-            img_after = encoder.grid_to_image_data_url(grid, cell_size=cs) if num_images >= 1 else None
-            img_diff = encoder.transition_image_data_url(grid_before, grid, cell_size=cs) if num_images >= 3 else None
+        if num_changed == 0:
+            observed = "No changes occurred; the grid is identical before and after the action."
+            print(f"\n{GREEN}{BOLD}Observer:{RESET}")
+            print(f"  {GREEN}{observed}{RESET}")
+            observer_results = [(cs, observed) for cs in cell_sizes]
+        else:
+            for cs in cell_sizes:
+                px_w, px_h = grid_w * cs, grid_h * cs
+                # 0=none, 1=AFTER only, 2=BEFORE+AFTER, 3=BEFORE+AFTER+composite
+                img_before = encoder.grid_to_image_data_url(grid_before, cell_size=cs) if num_images >= 2 else None
+                img_after = encoder.grid_to_image_data_url(grid, cell_size=cs) if num_images >= 1 else None
+                img_diff = encoder.transition_image_data_url(grid_before, grid, cell_size=cs) if num_images >= 3 else None
 
-            imgs_label = f"{num_images}img" if num_images > 0 else "text-only"
-            label = f"cell_size={cs} ({px_w}x{px_h}px, {imgs_label})" if num_images > 0 else "text-only"
-            print(f"\n{GREEN}{BOLD}Observer [{label}]:{RESET}")
-            observed = learner.observe_transition(
-                state_before=state_before,
-                state_after=state_text,
-                diff_text=diff_text,
-                image_before_url=img_before,
-                image_after_url=img_after,
-                image_diff_url=img_diff,
-            )
-            # Show full thinking (raw) then the extracted answer
-            raw = learner.last_raw_output
-            if raw != observed and raw:
-                print(f"  {DIM}{raw}{RESET}")
-                print(f"  {GREEN}{BOLD}=> {observed}{RESET}")
-            else:
-                print(f"  {GREEN}{observed}{RESET}")
-            observer_results.append((cs, observed))
+                imgs_label = f"{num_images}img" if num_images > 0 else "text-only"
+                label = f"cell_size={cs} ({px_w}x{px_h}px, {imgs_label})" if num_images > 0 else "text-only"
+                print(f"\n{GREEN}{BOLD}Observer [{label}]:{RESET}")
+                observed = learner.observe_transition(
+                    state_before=strip_obj(state_before),
+                    state_after=strip_obj(state_text),
+                    diff_text=diff_text,
+                    image_before_url=img_before,
+                    image_after_url=img_after,
+                    image_diff_url=img_diff,
+                )
+                # Show full thinking (raw) then the extracted answer
+                raw = learner.last_raw_output
+                if raw != observed and raw:
+                    print(f"  {DIM}{raw}{RESET}")
+                    print(f"  {GREEN}{BOLD}=> {observed}{RESET}")
+                else:
+                    print(f"  {GREEN}{observed}{RESET}")
+                observer_results.append((cs, observed))
 
         # --- Judge scores if WM was used ---
         if not args.no_wm:

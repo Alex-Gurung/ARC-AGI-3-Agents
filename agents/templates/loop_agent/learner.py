@@ -112,10 +112,13 @@ Think step by step, then output ONLY operations (no rationale/prose labels).
 ANSWER:
 <one or more operations, one per line>"""
 
-WORLD_MODEL_PROMPT = """\
-You are predicting what will happen next in an 8-bit style game on a \
-64x64 pixel grid. Each cell is one solid color. Every visual element \
-in the game has a purpose, even if it is not immediately clear.
+_GAME_CONTEXT = """\
+You are working with an 8-bit style puzzle game on a 64x64 pixel grid. \
+Each cell is one solid color. Game elements are abstract — colored \
+blocks, patterns, shapes, and indicators — not realistic objects. \
+Every visual element has a purpose, even if it is not immediately clear."""
+
+WORLD_MODEL_PROMPT = _GAME_CONTEXT + """
 
 Look at the image and identify every distinct visual element. Based on \
 your rulebook and what you know about the game, predict what will happen \
@@ -137,14 +140,9 @@ Think step by step, then output exactly one final line:
 ANSWER: <predicted state description>
 """
 
-OBSERVER_PROMPT = """\
-You are describing what changed in an 8-bit style game on a 64x64 pixel \
-grid. Each cell is one solid color. Every visual element in the game has \
-a purpose, even if it is not immediately clear.
+OBSERVER_PROMPT = _GAME_CONTEXT + """
 
-You have two images: the BEFORE state (first image) and the AFTER state \
-(second image). Use them to understand what the game looks like — the \
-colors, shapes, and layout.
+{image_context}
 
 The CELL CHANGES below are exact ground truth — they tell you precisely \
 which cells changed color. Your job is to interpret these changes: what \
@@ -374,10 +372,39 @@ class Learner:
         clean_before = self._strip_objects(state_before)
         clean_after = self._strip_objects(state_after)
 
+        # Build image context description based on what's actually attached
+        has_before = bool(image_before_url)
+        has_after = bool(image_after_url)
+        has_composite = bool(image_diff_url)
+        if has_before and has_after and has_composite:
+            img_ctx = (
+                "You have three images: BEFORE (1st), AFTER (2nd), and a "
+                "composite (3rd) with BEFORE|AFTER|REMOVED|ADDED panels. "
+                "Use them to understand the game's colors, shapes, and layout."
+            )
+        elif has_before and has_after:
+            img_ctx = (
+                "You have two images: BEFORE (1st) and AFTER (2nd). "
+                "Use them to understand the game's colors, shapes, and layout."
+            )
+        elif has_after:
+            img_ctx = (
+                "You have one image showing the AFTER state. "
+                "Use it to understand the game's colors, shapes, and layout."
+            )
+        elif has_before:
+            img_ctx = (
+                "You have one image showing the BEFORE state. "
+                "Use it to understand the game's colors, shapes, and layout."
+            )
+        else:
+            img_ctx = "No images are attached. Use the text data below."
+
         prompt = OBSERVER_PROMPT.format(
             state_before=clean_before,
             state_after=clean_after,
             diff_text=diff_text,
+            image_context=img_ctx,
         )
         images = [url for url in [image_before_url, image_after_url, image_diff_url] if url]
         raw_output = self._call_llm(
