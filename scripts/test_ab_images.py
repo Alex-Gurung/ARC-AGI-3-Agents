@@ -254,8 +254,10 @@ def run_ab_test(transitions: list[dict], max_transitions: int = 8) -> dict:
         result_a = run_pipeline(learner, encoder, memory, trans, use_images=True)
         results_a.append(result_a)
 
-        print(f"    WM prediction: {result_a['predicted'][:120]}...")
-        print(f"    Observer:      {result_a['observed'][:120]}...")
+        print("    WM prediction:")
+        print(textwrap.indent(result_a["predicted"], "      "))
+        print("    Observer:")
+        print(textwrap.indent(result_a["observed"], "      "))
         print(f"    Similarity:    {result_a['similarity']}/5  (surprise={result_a['surprise']:.2f})")
 
         # --- Condition B: text only ---
@@ -263,8 +265,10 @@ def run_ab_test(transitions: list[dict], max_transitions: int = 8) -> dict:
         result_b = run_pipeline(learner, encoder, memory, trans, use_images=False)
         results_b.append(result_b)
 
-        print(f"    WM prediction: {result_b['predicted'][:120]}...")
-        print(f"    Observer:      {result_b['observed'][:120]}...")
+        print("    WM prediction:")
+        print(textwrap.indent(result_b["predicted"], "      "))
+        print("    Observer:")
+        print(textwrap.indent(result_b["observed"], "      "))
         print(f"    Similarity:    {result_b['similarity']}/5  (surprise={result_b['surprise']:.2f})")
 
         delta = result_a["similarity"] - result_b["similarity"]
