@@ -6,6 +6,7 @@ what you actually see on screen.
 
 Usage:
     uv run python scripts/interactive_observe.py --game <game_id>
+    uv run python scripts/interactive_observe.py --game <game_id> --cell-sizes 4 8 16 32
 
 Controls:
     1-5     Take ACTION1-ACTION5
@@ -82,7 +83,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Interactive game with live Observer feedback")
     parser.add_argument("--game", "-g", type=str, required=True, help="Game ID")
     parser.add_argument("--no-wm", action="store_true", help="Skip world model predictions")
+    parser.add_argument(
+        "--cell-sizes", "-c", type=int, nargs="+", default=None,
+        help="Test multiple cell sizes (e.g. --cell-sizes 4 8 16 32). "
+             "Runs observer at each size to compare quality.",
+    )
     args = parser.parse_args()
+
+    cell_sizes = args.cell_sizes or [16]
 
     from arc_agi import Arcade
     from arcengine import GameAction
@@ -95,6 +103,8 @@ def main() -> None:
 
     print(f"{BOLD}VLLM:{RESET} {VLLM_BASE_URL}  model: {VLLM_MODEL}")
     print(f"{BOLD}Game:{RESET} {args.game}")
+    if len(cell_sizes) > 1:
+        print(f"{BOLD}Cell sizes:{RESET} {cell_sizes}")
     print(f"{DIM}Controls: 1-5 = ACTION1-5, 0/r = RESET, q = quit{RESET}\n")
 
     # Connect
@@ -154,14 +164,19 @@ def main() -> None:
         state_before = state_text
 
         # --- World Model prediction (before executing) ---
+        # WM uses the largest cell size for best quality
+        wm_cell_size = max(cell_sizes)
         if not args.no_wm:
-            img_before = encoder.grid_to_image_data_url(grid_before, cell_size=16)
-            print(f"\n{YELLOW}{BOLD}World Model predicts:{RESET}")
+            img_before_wm = encoder.grid_to_image_data_url(grid_before, cell_size=wm_cell_size)
+            grid_h = len(grid_before)
+            grid_w = len(grid_before[0]) if grid_before else 0
+            px_w, px_h = grid_w * wm_cell_size, grid_h * wm_cell_size
+            print(f"\n{YELLOW}{BOLD}World Model predicts (cell_size={wm_cell_size}, {px_w}x{px_h}px):{RESET}")
             predicted = learner.predict_outcome(
                 state_before=state_before,
                 action_taken=action.name,
                 memory=memory,
-                image_before_url=img_before,
+                image_before_url=img_before_wm,
             )
             print(f"  {YELLOW}{predicted}{RESET}")
 
@@ -189,29 +204,39 @@ def main() -> None:
         else:
             print(f"  {DIM}{diff_text}{RESET}")
 
-        # --- Observer describes what happened ---
-        img_before = encoder.grid_to_image_data_url(grid_before, cell_size=16)
-        img_after = encoder.grid_to_image_data_url(grid, cell_size=16)
-        img_diff = encoder.transition_image_data_url(grid_before, grid, cell_size=16)
+        # --- Observer at each cell size ---
+        grid_h = len(grid)
+        grid_w = len(grid[0]) if grid else 0
+        observer_results = []
 
-        print(f"\n{GREEN}{BOLD}Observer says:{RESET}")
-        observed = learner.observe_transition(
-            state_before=state_before,
-            state_after=state_text,
-            diff_text=diff_text,
-            image_before_url=img_before,
-            image_after_url=img_after,
-            image_diff_url=img_diff,
-        )
-        print(f"  {GREEN}{observed}{RESET}")
+        for cs in cell_sizes:
+            px_w, px_h = grid_w * cs, grid_h * cs
+            img_before = encoder.grid_to_image_data_url(grid_before, cell_size=cs)
+            img_after = encoder.grid_to_image_data_url(grid, cell_size=cs)
+            img_diff = encoder.transition_image_data_url(grid_before, grid, cell_size=cs)
+
+            label = f"cell_size={cs} ({px_w}x{px_h}px)"
+            print(f"\n{GREEN}{BOLD}Observer [{label}]:{RESET}")
+            observed = learner.observe_transition(
+                state_before=state_before,
+                state_after=state_text,
+                diff_text=diff_text,
+                image_before_url=img_before,
+                image_after_url=img_after,
+                image_diff_url=img_diff,
+            )
+            print(f"  {GREEN}{observed}{RESET}")
+            observer_results.append((cs, observed))
 
         # --- Judge scores if WM was used ---
         if not args.no_wm:
-            similarity = learner.judge_similarity(predicted, observed)
-            surprise = (6 - similarity) / 5.0
-            bar = "█" * similarity + "░" * (5 - similarity)
-            print(f"\n{BLUE}{BOLD}Judge:{RESET} similarity={similarity}/5  "
-                  f"surprise={surprise:.2f}  [{bar}]")
+            for cs, observed in observer_results:
+                similarity = learner.judge_similarity(predicted, observed)
+                surprise = (6 - similarity) / 5.0
+                bar = "█" * similarity + "░" * (5 - similarity)
+                label = f"cell_size={cs}" if len(cell_sizes) > 1 else ""
+                print(f"\n{BLUE}{BOLD}Judge{' [' + label + ']' if label else ''}:{RESET} "
+                      f"similarity={similarity}/5  surprise={surprise:.2f}  [{bar}]")
 
         if frame.state.name in ("WIN", "GAME_OVER"):
             print(f"\n{BOLD}Game ended: {frame.state.name}{RESET}")
