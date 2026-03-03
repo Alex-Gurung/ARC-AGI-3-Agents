@@ -648,8 +648,8 @@ class Learner:
             if stripped.startswith("OBJECTS") or stripped.startswith("RELATIONS"):
                 skip = True
                 continue
-            # End skip when we hit a new top-level section
-            if skip and stripped and not stripped.startswith(" ") and not stripped.startswith("..."):
+            # End skip when we hit a new top-level section (check original line indentation)
+            if skip and stripped and not line.startswith(" ") and not stripped.startswith("..."):
                 skip = False
             if not skip:
                 out.append(line)
