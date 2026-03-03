@@ -113,19 +113,15 @@ ANSWER:
 <one or more operations, one per line>"""
 
 WORLD_MODEL_PROMPT = """\
-You are predicting what will happen next in a grid-based game.
+You are predicting what will happen next in an 8-bit style game on a \
+64x64 pixel grid. Each cell is one solid color. Every visual element \
+in the game has a purpose, even if it is not immediately clear.
 
-Think step by step through the image:
+Look at the image and identify every distinct visual element. Based on \
+your rulebook and what you know about the game, predict what will happen \
+when the action is taken.
 
-1. What do you see? Describe each distinct object by its visual appearance — \
-color, shape, position (e.g., "a dark red block near the center", "a green \
-maze structure filling most of the grid", "a small blue-and-black piece").
-
-2. Based on your rulebook and what you know about the game, predict what \
-will happen when the action is taken. Which object will be affected? Where \
-will it end up? What will be revealed underneath?
-
-Remember: when an object moves, it reveals the background color where it was.
+When an object moves, it reveals the background color where it was.
 
 ACTION about to be taken: {action_taken}
 
@@ -134,17 +130,18 @@ ACTION about to be taken: {action_taken}
 TEXT STATE (for reference — use the image as primary):
 {state_before}
 
-Predict the state after the action in 3-5 sentences. Describe objects by \
-their visual appearance, not text IDs. Be specific ("the dark red block \
-moves up one row, revealing green background") not abstract ("a change \
-occurs"). Account for every visible element.
+Predict the state after the action in 2-4 sentences. Be specific about \
+what changes and what stays the same.
 
 Think step by step, then output exactly one final line:
 ANSWER: <predicted state description>
 """
 
 OBSERVER_PROMPT = """\
-You are describing what changed in a grid-based game after an action.
+You are describing what changed in an 8-bit style game on a 64x64 pixel \
+grid. Each cell is one solid color. Objects may be made of multiple colors. \
+Every visual element in the game has a purpose, even if it is not \
+immediately clear.
 
 The CELL CHANGES below are exact ground truth — they tell you precisely \
 which cells changed color. Your job is to interpret these changes: what \
@@ -157,8 +154,6 @@ How to interpret cell changes:
 - When an object moves, cells at its old position change TO the background \
 color, and cells at its new position change FROM the background color.
 - Groups of adjacent changes usually mean one event (one object moved).
-- A cell changing from color A to the background means something left. \
-A cell changing from background to color B means something arrived.
 
 STATE BEFORE:
 {state_before}
@@ -167,12 +162,11 @@ STATE AFTER:
 {state_after}
 
 If an image is attached, use it to understand what the colors and shapes \
-look like (e.g. what color 3 actually looks like, the spatial layout). \
-But base your change description on the CELL CHANGES, not visual comparison.
+look like. But base your change description on the CELL CHANGES above.
 
 Describe what happened in 2-4 sentences. Be specific: say which object \
 moved, in what direction, and what was revealed. Mention unchanged elements \
-briefly (e.g. "the maze structure and background remained the same").
+briefly.
 
 ANSWER: <description>
 """
