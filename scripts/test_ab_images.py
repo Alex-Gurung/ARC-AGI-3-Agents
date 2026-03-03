@@ -349,14 +349,14 @@ def print_summary(results: dict) -> None:
               f"(Image={ra['similarity']}/5, Text={rb['similarity']}/5)")
 
         print("\n  [A] Image+Text WM prediction:")
-        print(textwrap.indent(ra["predicted"][:300], "      "))
+        print(textwrap.indent(ra["predicted"], "      "))
         print("\n  [A] Image+Text Observer:")
-        print(textwrap.indent(ra["observed"][:300], "      "))
+        print(textwrap.indent(ra["observed"], "      "))
 
         print("\n  [B] Text-only WM prediction:")
-        print(textwrap.indent(rb["predicted"][:300], "      "))
+        print(textwrap.indent(rb["predicted"], "      "))
         print("\n  [B] Text-only Observer:")
-        print(textwrap.indent(rb["observed"][:300], "      "))
+        print(textwrap.indent(rb["observed"], "      "))
 
         shown += 1
 
@@ -370,14 +370,14 @@ def print_summary(results: dict) -> None:
                   f"(Image={ra['similarity']}/5, Text={rb['similarity']}/5)  [TIE]")
 
             print("\n  [A] Image+Text WM prediction:")
-            print(textwrap.indent(ra["predicted"][:300], "      "))
+            print(textwrap.indent(ra["predicted"], "      "))
             print("\n  [A] Image+Text Observer:")
-            print(textwrap.indent(ra["observed"][:300], "      "))
+            print(textwrap.indent(ra["observed"], "      "))
 
             print("\n  [B] Text-only WM prediction:")
-            print(textwrap.indent(rb["predicted"][:300], "      "))
+            print(textwrap.indent(rb["predicted"], "      "))
             print("\n  [B] Text-only Observer:")
-            print(textwrap.indent(rb["observed"][:300], "      "))
+            print(textwrap.indent(rb["observed"], "      "))
 
 
 def save_results(results: dict, output_path: Path) -> None:
