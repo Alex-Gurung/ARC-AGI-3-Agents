@@ -66,14 +66,14 @@ PREDICTION: {prediction}
 AFTER: {state_after}
 DIFF: {diff_text}
 
-IMAGES (primary visual evidence — look at these carefully):
+IMAGES (visual context):
 If images are attached, they show the actual game screenshots:
 - Image 1: BEFORE (game state before the action)
 - Image 2: AFTER (game state after the action)
-- Image 3: VISUAL DIFF (BEFORE|AFTER|DIFF composite — changed cells highlighted)
-Use the images to understand what objects look like, how they moved, and what \
-the spatial layout is. The text GRID/DIFF provides precise cell coordinates; \
-the images show the actual visual scene. Use both together.
+- Image 3: Composite with BEFORE | AFTER | REMOVED | ADDED panels \
+(REMOVED shows old colors of changed cells; ADDED shows new colors)
+Use the images to understand what objects look like and the spatial layout. \
+The text GRID/DIFF provides precise cell coordinates — use both together.
 Treat OBJECTS/RELATIONS as helpful but possibly noisy heuristics.
 
 RECENT_ACTIONS:
@@ -131,14 +131,15 @@ TEXT STATE (for reference):
 {state_before}
 
 Based on the image and your rulebook, predict what the game will look like \
-AFTER the action. Describe:
+AFTER the action. Be thorough — consider every object on the grid:
+- The player piece, walls, items, background, status indicators
 - Which objects will move, and where they will end up
-- What colors/regions will change
+- What colors/regions will change (remember: moving reveals background)
 - What will stay the same
-- The overall scene after the action
 
-~3-5 sentences. Be specific about spatial relationships ("the blue piece \
-moves one cell right") rather than abstract ("a change occurs").
+~3-5 sentences. Be specific about spatial relationships ("the dark red block \
+moves up one row, revealing green background") rather than abstract ("a \
+change occurs").
 Think step by step, then output exactly one final line:
 ANSWER: <predicted state description>
 """
@@ -146,24 +147,25 @@ ANSWER: <predicted state description>
 OBSERVER_PROMPT = """\
 You are describing a game state transition that just occurred.
 
-You are given images showing the game BEFORE and AFTER an action, plus a \
-visual diff highlighting what changed. Look at these images carefully — \
-they are your primary evidence.
+In grid-based games, common mechanics include:
+- A player object moving across the grid, revealing background where it was \
+and covering new cells where it lands
+- Objects pushing other objects or being blocked by walls/boundaries
+- Regions growing or shrinking as game state changes (doors opening, paths \
+extending, areas filling in)
+- Groups of adjacent cell changes usually represent a single event (one \
+object moved), not many separate changes
 
-Image order:
-- Image 1: BEFORE (the game state before the action)
-- Image 2: AFTER (the game state after the action)
-- Image 3: VISUAL DIFF (a composite showing BEFORE|AFTER|DIFF — the diff \
-panel highlights changed cells in bright colors against a dark background)
+CELL CHANGES (exactly what changed — this is ground truth, trust it):
+{diff_text}
 
-Compare the BEFORE and AFTER images. Describe:
-- What objects moved, and in which direction
-- What colors appeared, disappeared, or changed position
-- What structures stayed the same
-- The overall scene layout after the transition
-
-The text data below provides precise cell-level coordinates. Use it to \
-confirm or add detail to what you see in the images.
+The attached images show:
+- Image 1: BEFORE state
+- Image 2: AFTER state
+- Image 3: Composite with BEFORE | AFTER | REMOVED | ADDED panels \
+(REMOVED shows old colors of changed cells; ADDED shows new colors)
+Use the images to understand what the colors and shapes represent, but \
+base your description of what changed on the CELL CHANGES above.
 
 TEXT BEFORE:
 {state_before}
@@ -171,11 +173,15 @@ TEXT BEFORE:
 TEXT AFTER:
 {state_after}
 
-CELL CHANGES:
-{diff_text}
+Describe what happened in 3-5 sentences:
+- Group adjacent cell changes into single events (e.g., 50 cells changing \
+from color 9 to color 3 along a row = one object moved, not 50 changes)
+- Say what changed color, from what to what, and interpret it (moved? \
+revealed background? grew? appeared?)
+- Account for every distinct object/region visible: player piece, walls, \
+background, items, indicators. Don't skip anything.
+- Note what stayed the same
 
-~3-5 sentences. Ground your description in what you actually see changed \
-between the two images.
 Think step by step, then output exactly one final line:
 ANSWER: <observed state description>
 """

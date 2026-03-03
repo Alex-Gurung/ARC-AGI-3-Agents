@@ -190,10 +190,11 @@ class StateEncoder:
         grid_after: list[list[int]],
         cell_size: int = 8,
     ) -> str:
-        """Render a visual transition diff as BEFORE | AFTER | DIFF triptych.
+        """Render a visual transition as BEFORE | AFTER | REMOVED | ADDED.
 
-        DIFF panel uses dim gray for unchanged cells and bright new-color pixels
-        for changed cells, so multimodal models can quickly localize updates.
+        REMOVED panel shows the old color of changed cells (what disappeared).
+        ADDED panel shows the new color of changed cells (what appeared).
+        Unchanged cells are dim gray in both panels.
         """
         if (not grid_before or not grid_before[0]) and (not grid_after or not grid_after[0]):
             return ""
@@ -210,39 +211,59 @@ class StateEncoder:
         after_norm = self._normalize_grid(grid_after, width=width, height=height)
         before_image = self._render_grid_image(before_norm)
         after_image = self._render_grid_image(after_norm)
-        diff_image = Image.new("RGB", (width, height))
-        diff_px = diff_image.load()
-        if diff_px is None:
+
+        removed_image = Image.new("RGB", (width, height))
+        added_image = Image.new("RGB", (width, height))
+        rem_px = removed_image.load()
+        add_px = added_image.load()
+        if rem_px is None or add_px is None:
             return ""
 
+        dim = (22, 22, 22)
         for y in range(height):
             for x in range(width):
                 old_val = before_norm[y][x]
                 new_val = after_norm[y][x]
                 if old_val == new_val:
-                    diff_px[x, y] = (22, 22, 22)
+                    rem_px[x, y] = dim
+                    add_px[x, y] = dim
                     continue
+                # REMOVED: show old color (what was there before)
+                or_, og, ob = ARC_RGB_PALETTE.get(old_val, (255, 255, 255))
+                rem_px[x, y] = (
+                    min(255, or_ + 40),
+                    min(255, og + 40),
+                    min(255, ob + 40),
+                )
+                # ADDED: show new color (what appeared)
                 nr, ng, nb = ARC_RGB_PALETTE.get(new_val, (255, 255, 255))
-                # Slight brightening keeps changed pixels visible on dark panels.
-                diff_px[x, y] = (
+                add_px[x, y] = (
                     min(255, nr + 40),
                     min(255, ng + 40),
                     min(255, nb + 40),
                 )
 
         separator = 1
-        triptych = Image.new("RGB", (width * 3 + separator * 2, height), (0, 0, 0))
-        triptych.paste(before_image, (0, 0))
-        triptych.paste(after_image, (width + separator, 0))
-        triptych.paste(diff_image, (2 * width + 2 * separator, 0))
+        num_panels = 4
+        composite = Image.new(
+            "RGB",
+            (width * num_panels + separator * (num_panels - 1), height),
+            (0, 0, 0),
+        )
+        composite.paste(before_image, (0, 0))
+        composite.paste(after_image, (width + separator, 0))
+        composite.paste(removed_image, (2 * (width + separator), 0))
+        composite.paste(added_image, (3 * (width + separator), 0))
 
-        px = triptych.load()
+        # Draw separators
+        px = composite.load()
         if px is not None:
-            for y in range(height):
-                px[width, y] = (235, 235, 235)
-                px[2 * width + 1, y] = (235, 235, 235)
+            for s in range(1, num_panels):
+                sep_x = s * width + s * separator - 1
+                for y in range(height):
+                    px[sep_x, y] = (235, 235, 235)
 
-        return self._image_to_data_url(image=triptych, cell_size=cell_size)
+        return self._image_to_data_url(image=composite, cell_size=cell_size)
 
     def frame_to_image_data_url(
         self,
