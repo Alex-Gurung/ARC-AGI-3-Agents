@@ -66,12 +66,15 @@ PREDICTION: {prediction}
 AFTER: {state_after}
 DIFF: {diff_text}
 
-Treat GRID/CHANGED DIFF as primary evidence.
+IMAGES (primary visual evidence — look at these carefully):
+If images are attached, they show the actual game screenshots:
+- Image 1: BEFORE (game state before the action)
+- Image 2: AFTER (game state after the action)
+- Image 3: VISUAL DIFF (BEFORE|AFTER|DIFF composite — changed cells highlighted)
+Use the images to understand what objects look like, how they moved, and what \
+the spatial layout is. The text GRID/DIFF provides precise cell coordinates; \
+the images show the actual visual scene. Use both together.
 Treat OBJECTS/RELATIONS as helpful but possibly noisy heuristics.
-If images are attached, they are ordered as:
-- image1: BEFORE
-- image2: AFTER
-- image3: VISUAL_DIFF (BEFORE|AFTER|DIFF composite)
 
 RECENT_ACTIONS:
 {action_history}
@@ -110,27 +113,32 @@ ANSWER:
 <one or more operations, one per line>"""
 
 WORLD_MODEL_PROMPT = """\
-You are predicting what will happen next in a game.
+You are predicting what will happen next in a grid-based game.
 
-Given the current state, the action about to be taken, and your rulebook of \
-learned game mechanics, describe what the game state will look like AFTER \
-the action executes.
+Look at the attached image of the current game state. This is what the game \
+looks like RIGHT NOW. Use the image as your primary source of understanding — \
+identify the objects, colors, structures, and spatial layout from what you see.
 
-Be exhaustive: describe EVERY element visible on the grid — positions, colors, \
-spatial relationships, boundaries. Every element on the grid likely serves a \
-purpose, either in this level or in later levels. Do not omit objects just \
-because their role is unclear yet.
+The text state below provides precise cell-level data (grid coordinates, \
+color indices, object positions). Use it to supplement what you see in the \
+image, but trust your visual understanding of the scene first.
 
-STATE_BEFORE:
-{state_before}
-
-ACTION:
-{action_taken}
+ACTION about to be taken: {action_taken}
 
 {memory_text}
 
-Describe the predicted state after the action. Be specific about positions, \
-colors, and spatial relationships. ~3-5 sentences.
+TEXT STATE (for reference):
+{state_before}
+
+Based on the image and your rulebook, predict what the game will look like \
+AFTER the action. Describe:
+- Which objects will move, and where they will end up
+- What colors/regions will change
+- What will stay the same
+- The overall scene after the action
+
+~3-5 sentences. Be specific about spatial relationships ("the blue piece \
+moves one cell right") rather than abstract ("a change occurs").
 Think step by step, then output exactly one final line:
 ANSWER: <predicted state description>
 """
@@ -138,28 +146,36 @@ ANSWER: <predicted state description>
 OBSERVER_PROMPT = """\
 You are describing a game state transition that just occurred.
 
-Describe what changed and what the game state looks like now. Be exhaustive: \
-describe EVERY element visible on the grid — positions, colors, spatial \
-relationships, boundaries. Every element on the grid likely serves a purpose, \
-either in this level or in later levels. Do not omit objects just because \
-their role is unclear.
+You are given images showing the game BEFORE and AFTER an action, plus a \
+visual diff highlighting what changed. Look at these images carefully — \
+they are your primary evidence.
 
-STATE_BEFORE:
+Image order:
+- Image 1: BEFORE (the game state before the action)
+- Image 2: AFTER (the game state after the action)
+- Image 3: VISUAL DIFF (a composite showing BEFORE|AFTER|DIFF — the diff \
+panel highlights changed cells in bright colors against a dark background)
+
+Compare the BEFORE and AFTER images. Describe:
+- What objects moved, and in which direction
+- What colors appeared, disappeared, or changed position
+- What structures stayed the same
+- The overall scene layout after the transition
+
+The text data below provides precise cell-level coordinates. Use it to \
+confirm or add detail to what you see in the images.
+
+TEXT BEFORE:
 {state_before}
 
-STATE_AFTER:
+TEXT AFTER:
 {state_after}
 
-DIFF:
+CELL CHANGES:
 {diff_text}
 
-If images are attached, they are ordered as:
-- image1: BEFORE
-- image2: AFTER
-- image3: VISUAL_DIFF (BEFORE|AFTER|DIFF composite)
-
-Describe the observed transition and resulting state. Be specific about what \
-changed and what stayed the same. ~3-5 sentences.
+~3-5 sentences. Ground your description in what you actually see changed \
+between the two images.
 Think step by step, then output exactly one final line:
 ANSWER: <observed state description>
 """
