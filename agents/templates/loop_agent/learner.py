@@ -115,31 +115,30 @@ ANSWER:
 WORLD_MODEL_PROMPT = """\
 You are predicting what will happen next in a grid-based game.
 
-Look at the attached image of the current game state. This is what the game \
-looks like RIGHT NOW. Use the image as your primary source of understanding — \
-identify the objects, colors, structures, and spatial layout from what you see.
+Think step by step through the image:
 
-The text state below provides precise cell-level data (grid coordinates, \
-color indices, object positions). Use it to supplement what you see in the \
-image, but trust your visual understanding of the scene first.
+1. What do you see? Describe each distinct object by its visual appearance — \
+color, shape, position (e.g., "a dark red block near the center", "a green \
+maze structure filling most of the grid", "a small blue-and-black piece").
+
+2. Based on your rulebook and what you know about the game, predict what \
+will happen when the action is taken. Which object will be affected? Where \
+will it end up? What will be revealed underneath?
+
+Remember: when an object moves, it reveals the background color where it was.
 
 ACTION about to be taken: {action_taken}
 
 {memory_text}
 
-TEXT STATE (for reference):
+TEXT STATE (for reference — use the image as primary):
 {state_before}
 
-Based on the image and your rulebook, predict what the game will look like \
-AFTER the action. Be thorough — consider every object on the grid:
-- The player piece, walls, items, background, status indicators
-- Which objects will move, and where they will end up
-- What colors/regions will change (remember: moving reveals background)
-- What will stay the same
+Predict the state after the action in 3-5 sentences. Describe objects by \
+their visual appearance, not text IDs. Be specific ("the dark red block \
+moves up one row, revealing green background") not abstract ("a change \
+occurs"). Account for every visible element.
 
-~3-5 sentences. Be specific about spatial relationships ("the dark red block \
-moves up one row, revealing green background") rather than abstract ("a \
-change occurs").
 Think step by step, then output exactly one final line:
 ANSWER: <predicted state description>
 """
@@ -147,25 +146,26 @@ ANSWER: <predicted state description>
 OBSERVER_PROMPT = """\
 You are describing a game state transition that just occurred.
 
-In grid-based games, common mechanics include:
-- A player object moving across the grid, revealing background where it was \
-and covering new cells where it lands
-- Objects pushing other objects or being blocked by walls/boundaries
-- Regions growing or shrinking as game state changes (doors opening, paths \
-extending, areas filling in)
-- Groups of adjacent cell changes usually represent a single event (one \
-object moved), not many separate changes
+Think step by step through the images:
 
-CELL CHANGES (exactly what changed — this is ground truth, trust it):
+1. BEFORE image: What do you see? Describe each distinct object, its color, \
+shape, and position (e.g., "a dark red block near the center", "a green \
+maze-like structure", "a small blue piece on the left").
+
+2. AFTER image: What do you see now? Go through the same objects — what is \
+in the same place, what has moved, what is new or gone?
+
+3. REMOVED/ADDED panels: The last two panels highlight what disappeared \
+(REMOVED, showing old colors) and what appeared (ADDED, showing new colors) \
+against a dark background. These confirm where the changes happened.
+
+Common game mechanics to help interpret what you see:
+- A player object moving reveals the background color where it was
+- Objects can push other objects or be blocked by walls
+- Groups of changed cells usually mean one thing happened (one object moved)
+
+The CELL CHANGES below are exact — use them to verify your visual reasoning:
 {diff_text}
-
-The attached images show:
-- Image 1: BEFORE state
-- Image 2: AFTER state
-- Image 3: Composite with BEFORE | AFTER | REMOVED | ADDED panels \
-(REMOVED shows old colors of changed cells; ADDED shows new colors)
-Use the images to understand what the colors and shapes represent, but \
-base your description of what changed on the CELL CHANGES above.
 
 TEXT BEFORE:
 {state_before}
@@ -173,14 +173,9 @@ TEXT BEFORE:
 TEXT AFTER:
 {state_after}
 
-Describe what happened in 3-5 sentences:
-- Group adjacent cell changes into single events (e.g., 50 cells changing \
-from color 9 to color 3 along a row = one object moved, not 50 changes)
-- Say what changed color, from what to what, and interpret it (moved? \
-revealed background? grew? appeared?)
-- Account for every distinct object/region visible: player piece, walls, \
-background, items, indicators. Don't skip anything.
-- Note what stayed the same
+Now describe what happened in 3-5 sentences. Focus on what you SEE in the \
+images — describe objects by their visual appearance ("the dark red block", \
+"the green structure") not by text IDs. Account for every visible element.
 
 Think step by step, then output exactly one final line:
 ANSWER: <observed state description>
