@@ -88,9 +88,15 @@ def main() -> None:
         help="Test multiple cell sizes (e.g. --cell-sizes 4 8 16 32). "
              "Runs observer at each size to compare quality.",
     )
+    parser.add_argument(
+        "--images", type=int, default=3, choices=[1, 2, 3],
+        help="Number of images to send: 1=BEFORE only, 2=BEFORE+AFTER, "
+             "3=BEFORE+AFTER+composite (default: 3)",
+    )
     args = parser.parse_args()
 
     cell_sizes = args.cell_sizes or [16]
+    num_images = args.images
 
     from arc_agi import Arcade
     from arcengine import GameAction
@@ -178,7 +184,12 @@ def main() -> None:
                 memory=memory,
                 image_before_url=img_before_wm,
             )
-            print(f"  {YELLOW}{predicted}{RESET}")
+            raw = learner.last_raw_output
+            if raw != predicted and raw:
+                print(f"  {DIM}{raw}{RESET}")
+                print(f"  {YELLOW}{BOLD}=> {predicted}{RESET}")
+            else:
+                print(f"  {YELLOW}{predicted}{RESET}")
 
         # Execute action
         raw = env.step(action, data=action.action_data.model_dump())
@@ -212,10 +223,11 @@ def main() -> None:
         for cs in cell_sizes:
             px_w, px_h = grid_w * cs, grid_h * cs
             img_before = encoder.grid_to_image_data_url(grid_before, cell_size=cs)
-            img_after = encoder.grid_to_image_data_url(grid, cell_size=cs)
-            img_diff = encoder.transition_image_data_url(grid_before, grid, cell_size=cs)
+            img_after = encoder.grid_to_image_data_url(grid, cell_size=cs) if num_images >= 2 else None
+            img_diff = encoder.transition_image_data_url(grid_before, grid, cell_size=cs) if num_images >= 3 else None
 
-            label = f"cell_size={cs} ({px_w}x{px_h}px)"
+            imgs_label = f"{num_images}img" if num_images < 3 else "3img"
+            label = f"cell_size={cs} ({px_w}x{px_h}px, {imgs_label})"
             print(f"\n{GREEN}{BOLD}Observer [{label}]:{RESET}")
             observed = learner.observe_transition(
                 state_before=state_before,
@@ -225,7 +237,13 @@ def main() -> None:
                 image_after_url=img_after,
                 image_diff_url=img_diff,
             )
-            print(f"  {GREEN}{observed}{RESET}")
+            # Show full thinking (raw) then the extracted answer
+            raw = learner.last_raw_output
+            if raw != observed and raw:
+                print(f"  {DIM}{raw}{RESET}")
+                print(f"  {GREEN}{BOLD}=> {observed}{RESET}")
+            else:
+                print(f"  {GREEN}{observed}{RESET}")
             observer_results.append((cs, observed))
 
         # --- Judge scores if WM was used ---
