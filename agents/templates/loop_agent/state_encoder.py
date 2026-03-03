@@ -35,6 +35,33 @@ ARC_RGB_PALETTE: dict[int, tuple[int, int, int]] = {
     15: (22, 160, 133),
 }
 
+ARC_COLOR_NAMES: dict[int, str] = {
+    0: "black",
+    1: "blue",
+    2: "red",
+    3: "green",
+    4: "yellow",
+    5: "gray",
+    6: "pink",
+    7: "orange",
+    8: "light_blue",
+    9: "dark_red",
+    10: "white",
+    11: "teal",
+    12: "dark_orange",
+    13: "purple",
+    14: "dark_green",
+    15: "dark_teal",
+}
+
+
+def color_label(val: int) -> str:
+    """Return a human-readable label for a color value, e.g. 'green(3)'."""
+    name = ARC_COLOR_NAMES.get(val)
+    if name:
+        return f"{name}({val})"
+    return str(val)
+
 
 def _bbox_iou(
     a: tuple[int, int, int, int], b: tuple[int, int, int, int]
@@ -396,24 +423,114 @@ class StateEncoder:
 
         return changes
 
-    def _encode_diff(self, diff: list[tuple[int, int, int, int]]) -> str:
-        """Encode a diff as compact text."""
-        lines = [f"CHANGED ({len(diff)} cells):"]
+    def _encode_diff(
+        self, diff: list[tuple[int, int, int, int]], max_clusters: int = 20
+    ) -> str:
+        """Encode a diff as clustered, color-named text.
 
-        # If too many changes, summarize
-        if len(diff) > 100:
-            # Group by change type
-            change_types: Counter[tuple[int, int]] = Counter()
-            for x, y, old, new in diff:
-                change_types[(old, new)] += 1
-            lines.append("  (large diff, summarized)")
-            for (old, new), count in change_types.most_common(20):
-                lines.append(f"  {old}->{new}: {count} cells")
-        else:
-            for x, y, old, new in diff:
-                lines.append(f"  ({x},{y}):{old}->{new}")
+        Groups adjacent cells with the same (old, new) color change into
+        spatial clusters, then describes each cluster compactly.
+        Shows up to *max_clusters* largest clusters; summarizes the rest.
+        """
+        if not diff:
+            return "CHANGED (0 cells): no changes"
+
+        clusters = self._cluster_diff(diff)
+        lines = [f"CHANGED ({len(diff)} cells, {len(clusters)} clusters):"]
+
+        shown = clusters[:max_clusters]
+        omitted = clusters[max_clusters:]
+
+        for cluster in shown:
+            old_c, new_c = cluster["old"], cluster["new"]
+            cells = cluster["cells"]
+            n = len(cells)
+            cx, cy = cluster["center"]
+            min_x, min_y = cluster["min_x"], cluster["min_y"]
+            max_x, max_y = cluster["max_x"], cluster["max_y"]
+
+            old_label = color_label(old_c)
+            new_label = color_label(new_c)
+
+            if n == 1:
+                lines.append(f"  ({cx},{cy}): {old_label} -> {new_label}")
+            else:
+                span = f"({min_x},{min_y})-({max_x},{max_y})"
+                lines.append(
+                    f"  {n} cells near ({cx},{cy}) [{span}]: "
+                    f"{old_label} -> {new_label}"
+                )
+
+        if omitted:
+            omitted_cells = sum(len(c["cells"]) for c in omitted)
+            # Summarize omitted by change type
+            type_counts: Counter[tuple[int, int]] = Counter()
+            for c in omitted:
+                type_counts[(c["old"], c["new"])] += len(c["cells"])
+            parts = []
+            for (old_c, new_c), count in type_counts.most_common(5):
+                parts.append(f"{color_label(old_c)}->{color_label(new_c)}: {count}")
+            lines.append(
+                f"  ... {len(omitted)} more clusters ({omitted_cells} cells): "
+                + ", ".join(parts)
+            )
 
         return "\n".join(lines)
+
+    @staticmethod
+    def _cluster_diff(
+        diff: list[tuple[int, int, int, int]],
+    ) -> list[dict]:
+        """Cluster diff cells by (old, new) color pair and spatial adjacency.
+
+        Uses flood-fill on 4-connected neighbors that share the same
+        (old, new) change type. Returns list of cluster dicts sorted by
+        size descending.
+        """
+        # Group by change type
+        by_type: dict[tuple[int, int], set[tuple[int, int]]] = {}
+        for x, y, old, new in diff:
+            key = (old, new)
+            if key not in by_type:
+                by_type[key] = set()
+            by_type[key].add((x, y))
+
+        clusters: list[dict] = []
+
+        for (old_c, new_c), positions in by_type.items():
+            remaining = set(positions)
+            while remaining:
+                # Flood-fill one cluster
+                seed = next(iter(remaining))
+                component: list[tuple[int, int]] = []
+                stack = [seed]
+                while stack:
+                    pos = stack.pop()
+                    if pos not in remaining:
+                        continue
+                    remaining.discard(pos)
+                    component.append(pos)
+                    px, py = pos
+                    for nx, ny in [(px - 1, py), (px + 1, py),
+                                   (px, py - 1), (px, py + 1)]:
+                        if (nx, ny) in remaining:
+                            stack.append((nx, ny))
+
+                xs = [p[0] for p in component]
+                ys = [p[1] for p in component]
+                clusters.append({
+                    "old": old_c,
+                    "new": new_c,
+                    "cells": component,
+                    "center": (round(sum(xs) / len(xs)), round(sum(ys) / len(ys))),
+                    "min_x": min(xs),
+                    "min_y": min(ys),
+                    "max_x": max(xs),
+                    "max_y": max(ys),
+                })
+
+        clusters.sort(key=lambda c: len(c["cells"]), reverse=True)
+        return clusters
 
     def _encode_summary(self, grid: list[list[int]]) -> str:
         """Encode structural summary statistics."""

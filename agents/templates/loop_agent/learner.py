@@ -376,9 +376,13 @@ class Learner:
         Produces a ground-truth semantic description of the observed state change.
         This is the reference side for the judge comparison.
         """
+        # Strip OBJECTS/RELATIONS sections — they confuse the observer
+        clean_before = self._strip_objects(state_before)
+        clean_after = self._strip_objects(state_after)
+
         prompt = OBSERVER_PROMPT.format(
-            state_before=state_before,
-            state_after=state_after,
+            state_before=clean_before,
+            state_after=clean_after,
             diff_text=diff_text,
         )
         images = [url for url in [image_before_url, image_after_url, image_diff_url] if url]
@@ -607,6 +611,28 @@ class Learner:
 
         return text
 
+
+    @staticmethod
+    def _strip_objects(state_text: str) -> str:
+        """Remove OBJECTS and RELATIONS sections from encoded state text.
+
+        These sections use noisy heuristic IDs (O0, O1, ...) that confuse
+        small models. Keep GRID, SUMMARY, and metadata.
+        """
+        lines = state_text.splitlines()
+        out: list[str] = []
+        skip = False
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("OBJECTS") or stripped.startswith("RELATIONS"):
+                skip = True
+                continue
+            # End skip when we hit a new top-level section
+            if skip and stripped and not stripped.startswith(" ") and not stripped.startswith("..."):
+                skip = False
+            if not skip:
+                out.append(line)
+        return "\n".join(out)
 
     @property
     def memory_is_stable(self) -> bool:
