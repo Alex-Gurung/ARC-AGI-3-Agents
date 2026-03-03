@@ -144,48 +144,37 @@ ANSWER: <predicted state description>
 """
 
 OBSERVER_PROMPT = """\
-You are describing a game state transition that just occurred.
+You are describing what changed in a grid-based game after an action.
 
-You have two separate images. The FIRST image is the BEFORE state. The \
-SECOND image is the AFTER state. You may also have a third composite image \
-with four panels: BEFORE | AFTER | REMOVED | ADDED (REMOVED highlights old \
-colors of changed cells; ADDED highlights new colors).
+The CELL CHANGES below are exact ground truth — they tell you precisely \
+which cells changed color. Your job is to interpret these changes: what \
+moved, what was revealed, what happened.
 
-Think step by step:
-
-1. BEFORE (first image): List every distinct visual element you see — \
-describe each by color, shape, and position. For example: "a large green \
-maze structure filling the center", "a dark red block inside the maze near \
-row 20", "a small blue-and-black piece at the left edge", "a grey-and-red \
-symbol in the bottom-left corner", "a yellow background", "a status bar at \
-the bottom with colored indicators".
-
-2. AFTER (second image): Go through the SAME list of elements. For each \
-one, say whether it stayed in the same place or changed. Be precise about \
-direction — if something moved, say left/right/up/down relative to where \
-it was in the BEFORE image.
-
-3. Summary: What happened? Use these common game mechanics to interpret:
-- An object moving reveals the background color where it was
-- Objects can push other objects or be blocked by walls
-- Groups of adjacent changed cells usually mean one event (one object moved)
-
-The CELL CHANGES below are exact — use them to verify direction and extent:
+CELL CHANGES (ground truth):
 {diff_text}
 
-TEXT BEFORE:
+How to interpret cell changes:
+- When an object moves, cells at its old position change TO the background \
+color, and cells at its new position change FROM the background color.
+- Groups of adjacent changes usually mean one event (one object moved).
+- A cell changing from color A to the background means something left. \
+A cell changing from background to color B means something arrived.
+
+STATE BEFORE:
 {state_before}
 
-TEXT AFTER:
+STATE AFTER:
 {state_after}
 
-Now output your description. You MUST mention every distinct visual element \
-(player piece, structures, blocks, symbols, background, status bar, etc.) \
-and say whether it changed or stayed the same. Describe objects by visual \
-appearance, not text IDs.
+If an image is attached, use it to understand what the colors and shapes \
+look like (e.g. what color 3 actually looks like, the spatial layout). \
+But base your change description on the CELL CHANGES, not visual comparison.
 
-Think step by step, then output exactly one final line:
-ANSWER: <observed state description>
+Describe what happened in 2-4 sentences. Be specific: say which object \
+moved, in what direction, and what was revealed. Mention unchanged elements \
+briefly (e.g. "the maze structure and background remained the same").
+
+ANSWER: <description>
 """
 
 JUDGE_PROMPT = """\

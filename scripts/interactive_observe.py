@@ -89,9 +89,9 @@ def main() -> None:
              "Runs observer at each size to compare quality.",
     )
     parser.add_argument(
-        "--images", type=int, default=3, choices=[1, 2, 3],
-        help="Number of images to send: 1=BEFORE only, 2=BEFORE+AFTER, "
-             "3=BEFORE+AFTER+composite (default: 3)",
+        "--images", type=int, default=1, choices=[0, 1, 2, 3],
+        help="Number of images to send: 0=text only, 1=AFTER only (default), "
+             "2=BEFORE+AFTER, 3=BEFORE+AFTER+composite",
     )
     args = parser.parse_args()
 
@@ -222,12 +222,13 @@ def main() -> None:
 
         for cs in cell_sizes:
             px_w, px_h = grid_w * cs, grid_h * cs
-            img_before = encoder.grid_to_image_data_url(grid_before, cell_size=cs)
-            img_after = encoder.grid_to_image_data_url(grid, cell_size=cs) if num_images >= 2 else None
+            # 0=none, 1=AFTER only, 2=BEFORE+AFTER, 3=BEFORE+AFTER+composite
+            img_before = encoder.grid_to_image_data_url(grid_before, cell_size=cs) if num_images >= 2 else None
+            img_after = encoder.grid_to_image_data_url(grid, cell_size=cs) if num_images >= 1 else None
             img_diff = encoder.transition_image_data_url(grid_before, grid, cell_size=cs) if num_images >= 3 else None
 
-            imgs_label = f"{num_images}img" if num_images < 3 else "3img"
-            label = f"cell_size={cs} ({px_w}x{px_h}px, {imgs_label})"
+            imgs_label = f"{num_images}img" if num_images > 0 else "text-only"
+            label = f"cell_size={cs} ({px_w}x{px_h}px, {imgs_label})" if num_images > 0 else "text-only"
             print(f"\n{GREEN}{BOLD}Observer [{label}]:{RESET}")
             observed = learner.observe_transition(
                 state_before=state_before,
