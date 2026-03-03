@@ -89,9 +89,9 @@ def main() -> None:
              "Runs observer at each size to compare quality.",
     )
     parser.add_argument(
-        "--images", type=int, default=1, choices=[0, 1, 2, 3],
-        help="Number of images to send: 0=text only, 1=AFTER only (default), "
-             "2=BEFORE+AFTER, 3=BEFORE+AFTER+composite",
+        "--images", type=int, default=2, choices=[0, 1, 2, 3],
+        help="Number of images to send: 0=text only, 1=AFTER only, "
+             "2=BEFORE+AFTER (default), 3=BEFORE+AFTER+composite",
     )
     args = parser.parse_args()
 

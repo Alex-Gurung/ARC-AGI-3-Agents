@@ -139,9 +139,12 @@ ANSWER: <predicted state description>
 
 OBSERVER_PROMPT = """\
 You are describing what changed in an 8-bit style game on a 64x64 pixel \
-grid. Each cell is one solid color. Objects may be made of multiple colors. \
-Every visual element in the game has a purpose, even if it is not \
-immediately clear.
+grid. Each cell is one solid color. Every visual element in the game has \
+a purpose, even if it is not immediately clear.
+
+You have two images: the BEFORE state (first image) and the AFTER state \
+(second image). Use them to understand what the game looks like — the \
+colors, shapes, and layout.
 
 The CELL CHANGES below are exact ground truth — they tell you precisely \
 which cells changed color. Your job is to interpret these changes: what \
@@ -160,9 +163,6 @@ STATE BEFORE:
 
 STATE AFTER:
 {state_after}
-
-If an image is attached, use it to understand what the colors and shapes \
-look like. But base your change description on the CELL CHANGES above.
 
 Describe what happened in 2-4 sentences. Be specific: say which object \
 moved, in what direction, and what was revealed. Mention unchanged elements \
