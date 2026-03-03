@@ -328,25 +328,18 @@ def print_summary(results: dict) -> None:
 
     # Show detailed outputs for the most interesting cases
     print(f"\n{'─' * 60}")
-    print("DETAILED OUTPUTS (largest image vs text divergence)")
+    print("DETAILED OUTPUTS (all transitions)")
     print(f"{'─' * 60}")
 
-    deltas = [(abs(sims_a[i] - sims_b[i]), i) for i in range(n)]
-    deltas.sort(reverse=True)
-
-    shown = 0
-    for delta, idx in deltas:
-        if delta == 0:
-            break
-        if shown >= 3:
-            break
-
+    for idx in range(n):
         trans = results["transitions"][idx]
         ra = results_a[idx]
         rb = results_b[idx]
+        delta = sims_a[idx] - sims_b[idx]
+        tag = "IMG+" if delta > 0 else ("TXT+" if delta < 0 else "TIE")
 
         print(f"\n  Step {trans['step']}: {trans['action']}  "
-              f"(Image={ra['similarity']}/5, Text={rb['similarity']}/5)")
+              f"(Image={ra['similarity']}/5, Text={rb['similarity']}/5)  [{tag}]")
 
         print("\n  [A] Image+Text WM prediction:")
         print(textwrap.indent(ra["predicted"], "      "))
@@ -357,27 +350,6 @@ def print_summary(results: dict) -> None:
         print(textwrap.indent(rb["predicted"], "      "))
         print("\n  [B] Text-only Observer:")
         print(textwrap.indent(rb["observed"], "      "))
-
-        shown += 1
-
-    if shown == 0:
-        # All ties — still show one full example
-        if n > 0:
-            trans = results["transitions"][0]
-            ra = results_a[0]
-            rb = results_b[0]
-            print(f"\n  Step {trans['step']}: {trans['action']}  "
-                  f"(Image={ra['similarity']}/5, Text={rb['similarity']}/5)  [TIE]")
-
-            print("\n  [A] Image+Text WM prediction:")
-            print(textwrap.indent(ra["predicted"], "      "))
-            print("\n  [A] Image+Text Observer:")
-            print(textwrap.indent(ra["observed"], "      "))
-
-            print("\n  [B] Text-only WM prediction:")
-            print(textwrap.indent(rb["predicted"], "      "))
-            print("\n  [B] Text-only Observer:")
-            print(textwrap.indent(rb["observed"], "      "))
 
 
 def save_results(results: dict, output_path: Path) -> None:
