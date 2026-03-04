@@ -292,6 +292,57 @@ class StateEncoder:
 
         return self._image_to_data_url(image=composite, cell_size=cell_size)
 
+    def grid_sequence_to_video(
+        self,
+        grids: list[list[list[int]]],
+        cell_size: int = 16,
+        fps: float = 1.0,
+    ) -> str:
+        """Render a sequence of grids as video frames, return temp file path.
+
+        Uses imageio+ffmpeg to create an MP4 file. Each grid becomes one
+        frame, upscaled by cell_size with nearest-neighbor interpolation.
+
+        Args:
+            grids: List of grids (each is list[list[int]])
+            cell_size: Pixels per cell (upscale factor)
+            fps: Frames per second (1.0 = each frame shown for 1 second)
+
+        Returns:
+            Path to temporary .mp4 file. Caller is responsible for cleanup.
+        """
+        import tempfile
+
+        import imageio.v3 as iio
+        import numpy as np
+
+        if not grids:
+            return ""
+
+        frames = []
+        for grid in grids:
+            img = self._render_grid_image(grid)
+            if cell_size > 1:
+                img = img.resize(
+                    (img.width * cell_size, img.height * cell_size),
+                    resample=Image.Resampling.NEAREST,
+                )
+            frames.append(np.array(img))
+
+        fd, path = tempfile.mkstemp(suffix=".mp4")
+        try:
+            iio.imwrite(
+                path,
+                np.stack(frames),
+                fps=fps,
+                codec="libx264",
+            )
+        finally:
+            import os
+
+            os.close(fd)
+        return path
+
     def frame_to_image_data_url(
         self,
         frame: FrameData,

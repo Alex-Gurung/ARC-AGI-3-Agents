@@ -21,6 +21,7 @@ from openai import OpenAI
 from ...agent import Agent
 from ...tracing import trace_agent_session
 from .curiosity import Curiosity
+from .entity_registry import EntityRegistry
 from .learner import Learner
 from .memory import Memory, MemoryEntry
 from .runtime import LoopRuntime
@@ -108,6 +109,7 @@ class LoopAgent(Agent):
         self.state_encoder = StateEncoder(keyframe_interval=self.KEYFRAME_INTERVAL)
         self.curiosity = Curiosity(self.client, self.VLLM_MODEL)
         self.learner = Learner(self.client, self.VLLM_MODEL)
+        self.entity_registry = EntityRegistry()
         self.solver = Solver(self.client, self.VLLM_MODEL)
         self.level_controller = LevelController(
             convergence_threshold=0.05,
@@ -581,7 +583,16 @@ class LoopAgent(Agent):
                 image_before_url=state_before_image,
                 image_after_url=state_after_image,
                 image_diff_url=transition_image,
+                known_elements=self.entity_registry.to_prompt_text(),
             )
+
+            # Update entity registry from observer output
+            self.entity_registry.update_census(grid_after)
+            raw_entities = self.learner.extract_entities(
+                self.learner.last_raw_output
+            )
+            if raw_entities:
+                self.entity_registry.update_labels(raw_entities)
 
             # 3. JUDGE: score prediction accuracy
             similarity = self.learner.judge_similarity(predicted, observed)
@@ -743,7 +754,16 @@ class LoopAgent(Agent):
             image_before_url=start_image,
             image_after_url=end_image,
             image_diff_url=transition_image,
+            known_elements=self.entity_registry.to_prompt_text(),
         )
+
+        # Update entity registry from observer output
+        self.entity_registry.update_census(grid_after)
+        raw_entities = self.learner.extract_entities(
+            self.learner.last_raw_output
+        )
+        if raw_entities:
+            self.entity_registry.update_labels(raw_entities)
 
         # 3. JUDGE: score prediction accuracy
         similarity = self.learner.judge_similarity(predicted, observed)
@@ -1683,6 +1703,7 @@ class LoopAgent(Agent):
         )
         self._levels_completed_at_reset = frame.levels_completed
         self.state_encoder.reset()
+        self.entity_registry.reset()
         self.current_mode = DecisionMode.LEARN_ACTION
         self.phase = Phase.EXPLORE
         self.explore_actions_taken = 0
