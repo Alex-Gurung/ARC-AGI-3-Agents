@@ -90,20 +90,24 @@ Each frame shows the game grid after a different action was taken. The game \
 is on a 64x64 pixel grid where each cell is one solid color.
 
 Game elements are abstract — colored blocks, patterns, shapes, and \
-indicators — not realistic objects.
+indicators — not realistic objects. A single game element may be composed \
+of multiple colors (e.g. a player with a colored head and body, a bordered \
+region with a door of a different color, a patterned tile).
 
 The actions taken between frames were:
 {action_list}
 
 Watch carefully how the grid changes between frames. Identify:
-1. Which colored element is the PLAYER (the thing that moves in response \
-to actions)?
-2. What are the static elements (walls, borders, background)?
+1. Which element is the PLAYER (the thing that moves in response to actions)? \
+It may be a single color or a multi-color shape.
+2. What are the static elements (walls, borders, background)? A border and \
+its door may be different colors but form one element.
 3. Are there any other dynamic elements (items, indicators, triggers)?
 
-List every distinct colored element you can identify:
+List the distinct game elements you can identify. Group colors that belong \
+to the same element together:
 ENTITIES:
-<color_name(N)>: <role> (<low/medium/high>)
+- <element_role>: <brief description> (colors: <color(N)>, <color(M)>, ...)
 
 Then summarize what you learned about the game mechanics.
 ANSWER: <summary>

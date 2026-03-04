@@ -168,9 +168,11 @@ Describe what happened in 2-4 sentences. Be specific: say which object \
 moved, in what direction, and what was revealed. Mention unchanged elements \
 briefly.
 
-Then list every distinct colored element you can identify in the game:
+Then list the distinct game elements (pieces, regions, indicators) you can \
+identify. An element may be composed of multiple colors (e.g. a player with \
+a head and body, a bordered region with a door, a patterned tile).
 ENTITIES:
-<color_name(N)>: <role> (<low/medium/high>)
+- <element_role>: <brief description> (colors: <color(N)>, <color(M)>, ...)
 
 ANSWER: <description>
 """
@@ -676,34 +678,60 @@ class Learner:
     def extract_entities(raw_output: str) -> dict[int, str]:
         """Parse ENTITIES section from Observer output.
 
-        Expected format (anywhere in the output):
+        Supports two formats:
+
+        Multi-color element format (preferred):
+            ENTITIES:
+            - player: small moving piece (colors: green(3), yellow(4))
+            - border: wall around grid (colors: dark_red(9))
+
+        Legacy single-color format (still accepted):
             ENTITIES:
             green(3): player piece (high)
-            black(0): background (medium)
 
-        Returns mapping of color_int -> role_label.
+        Returns mapping of color_int -> element_role.
+        Multiple colors in one element all get the same role.
         Robust: returns empty dict if parsing fails.
         """
         result: dict[int, str] = {}
-        # Find the ENTITIES: section
         match = re.search(r"(?im)^ENTITIES\s*:", raw_output)
         if not match:
             return result
 
         lines = raw_output[match.end() :].splitlines()
-        # Pattern: color_name(N): role (confidence)
-        entity_re = re.compile(
+        # Multi-color format: - <role>: <description> (colors: name(N), name(M), ...)
+        multi_re = re.compile(
+            r"^\s*[-*]?\s*(\w[\w\s]*?)\s*:\s*(.+?)"
+            r"\s*\(colors?\s*:\s*(.+?)\)\s*$",
+            re.IGNORECASE,
+        )
+        # Extract color numbers from a colors list like "green(3), yellow(4)"
+        color_num_re = re.compile(r"\w+\((\d+)\)")
+        # Legacy single-color: color_name(N): role (confidence)
+        legacy_re = re.compile(
             r"^\s*\w+\((\d+)\)\s*:\s*(.+?)(?:\s*\((?:low|medium|high)\))?\s*$",
             re.IGNORECASE,
         )
+
         for line in lines:
             stripped = line.strip()
             if not stripped:
                 continue
-            # Stop at ANSWER: or other section markers
             if re.match(r"(?i)^(ANSWER|STATE|CELL|KNOWN|GRID)\b", stripped):
                 break
-            m = entity_re.match(stripped)
+
+            # Try multi-color format first
+            m = multi_re.match(stripped)
+            if m:
+                role = m.group(1).strip()
+                colors_str = m.group(3)
+                for cm in color_num_re.finditer(colors_str):
+                    color_int = int(cm.group(1))
+                    result[color_int] = role
+                continue
+
+            # Fallback: legacy single-color format
+            m = legacy_re.match(stripped)
             if m:
                 color_int = int(m.group(1))
                 label = m.group(2).strip()
