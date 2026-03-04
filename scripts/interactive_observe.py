@@ -111,7 +111,7 @@ ANSWER: <summary>
 
 
 def run_exploration(env, encoder, learner, entity_reg, game_id, n_actions, cell_size,
-                    convert_fn, strip_fn):
+                    convert_fn):
     """Auto-play N random actions, build a video, ask model to ID elements."""
     grids = []
     actions_taken = []
@@ -270,7 +270,6 @@ def main() -> None:
             n_actions=args.explore,
             cell_size=max(cell_sizes),
             convert_fn=convert_raw_frame,
-            strip_fn=strip_obj,
         )
         if raw is None:
             raw = env.reset()
