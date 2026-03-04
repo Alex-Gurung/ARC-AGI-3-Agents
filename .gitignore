@@ -1,3 +1,5 @@
+.venv/
+new*/
 .claude/
 # OS and environment
 .DS_Store
