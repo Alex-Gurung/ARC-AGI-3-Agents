@@ -296,17 +296,19 @@ class StateEncoder:
         self,
         grids: list[list[list[int]]],
         cell_size: int = 16,
-        fps: float = 1.0,
+        fps: float = 24.0,
+        hold_seconds: float = 0.5,
     ) -> str:
         """Render a sequence of grids as video frames, return temp file path.
 
-        Uses imageio+ffmpeg to create an MP4 file. Each grid becomes one
-        frame, upscaled by cell_size with nearest-neighbor interpolation.
+        Uses imageio+ffmpeg to create an MP4 file. Each grid is held for
+        hold_seconds at the given fps, producing a natural-looking video.
 
         Args:
             grids: List of grids (each is list[list[int]])
             cell_size: Pixels per cell (upscale factor)
-            fps: Frames per second (1.0 = each frame shown for 1 second)
+            fps: Frames per second (24.0 = standard video framerate)
+            hold_seconds: How long each grid state is shown (0.5 = half second)
 
         Returns:
             Path to temporary .mp4 file. Caller is responsible for cleanup.
@@ -319,9 +321,8 @@ class StateEncoder:
         if not grids:
             return ""
 
-        # Duplicate each frame so the codec has enough to estimate rate
-        # and each state is visible for a reasonable duration.
-        repeats_per_frame = max(1, round(fps * 2))  # ~2 seconds per grid
+        # Each grid is held for hold_seconds at the given fps
+        repeats_per_frame = max(1, round(fps * hold_seconds))
         frames = []
         for grid in grids:
             img = self._render_grid_image(grid)

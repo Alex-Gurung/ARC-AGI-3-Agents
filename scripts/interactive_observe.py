@@ -163,7 +163,7 @@ def run_exploration(env, encoder, learner, entity_reg, game_id, n_actions, cell_
 
     # Build video
     print(f"  {DIM}Building video from {len(grids)} frames...{RESET}")
-    video_path = encoder.grid_sequence_to_video(grids, cell_size=cell_size)
+    video_path = encoder.grid_sequence_to_video(grids, cell_size=cell_size, hold_seconds=0.1)
 
     # Build action list text
     action_list = "\n".join(
