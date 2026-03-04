@@ -319,6 +319,9 @@ class StateEncoder:
         if not grids:
             return ""
 
+        # Duplicate each frame so the codec has enough to estimate rate
+        # and each state is visible for a reasonable duration.
+        repeats_per_frame = max(1, round(fps * 2))  # ~2 seconds per grid
         frames = []
         for grid in grids:
             img = self._render_grid_image(grid)
@@ -327,7 +330,9 @@ class StateEncoder:
                     (img.width * cell_size, img.height * cell_size),
                     resample=Image.Resampling.NEAREST,
                 )
-            frames.append(np.array(img))
+            arr = np.array(img)
+            for _ in range(repeats_per_frame):
+                frames.append(arr)
 
         fd, path = tempfile.mkstemp(suffix=".mp4")
         try:
@@ -336,6 +341,7 @@ class StateEncoder:
                 np.stack(frames),
                 fps=fps,
                 codec="libx264",
+                plugin="pyav",
             )
         finally:
             import os

@@ -537,13 +537,12 @@ class Learner:
         content: str | list[dict[str, object]]
         image_data_urls = [u for u in (image_data_urls or []) if u]
         if video_url:
-            # vLLM Qwen3-VL expects {"type": "video", "video": "file:///..."}
             video_ref = video_url
             if not video_ref.startswith(("file://", "http://", "https://", "data:")):
                 video_ref = f"file://{video_ref}"
             content = [
                 {"type": "text", "text": prompt},
-                {"type": "video", "video": video_ref},
+                {"type": "video_url", "video_url": {"url": video_ref}},
             ]
         elif image_data_urls:
             content = [{"type": "text", "text": prompt}]
