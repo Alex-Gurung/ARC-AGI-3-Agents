@@ -144,6 +144,8 @@ OBSERVER_PROMPT = _GAME_CONTEXT + """
 
 {image_context}
 
+{known_elements}
+
 The CELL CHANGES below are exact ground truth — they tell you precisely \
 which cells changed color. Your job is to interpret these changes: what \
 moved, what was revealed, what happened.
@@ -165,6 +167,10 @@ STATE AFTER:
 Describe what happened in 2-4 sentences. Be specific: say which object \
 moved, in what direction, and what was revealed. Mention unchanged elements \
 briefly.
+
+Then list every distinct colored element you can identify in the game:
+ENTITIES:
+<color_name(N)>: <role> (<low/medium/high>)
 
 ANSWER: <description>
 """
@@ -362,6 +368,8 @@ class Learner:
         image_before_url: str | None = None,
         image_after_url: str | None = None,
         image_diff_url: str | None = None,
+        video_url: str | None = None,
+        known_elements: str = "",
     ) -> str:
         """Observer agent: describe what actually happened in the transition.
 
@@ -373,46 +381,69 @@ class Learner:
         clean_after = self._strip_objects(state_after)
 
         # Build image context description based on what's actually attached
-        has_before = bool(image_before_url)
-        has_after = bool(image_after_url)
-        has_composite = bool(image_diff_url)
-        if has_before and has_after and has_composite:
+        if video_url:
             img_ctx = (
-                "You have three images: BEFORE (1st), AFTER (2nd), and a "
-                "composite (3rd) with BEFORE|AFTER|REMOVED|ADDED panels. "
-                "Use them to understand the game's colors, shapes, and layout."
-            )
-        elif has_before and has_after:
-            img_ctx = (
-                "You have two images: BEFORE (1st) and AFTER (2nd). "
-                "Use them to understand the game's colors, shapes, and layout."
-            )
-        elif has_after:
-            img_ctx = (
-                "You have one image showing the AFTER state. "
-                "Use it to understand the game's colors, shapes, and layout."
-            )
-        elif has_before:
-            img_ctx = (
-                "You have one image showing the BEFORE state. "
+                "You have a short video showing the transition: "
+                "frame 1 is BEFORE, frame 2 is AFTER. "
                 "Use it to understand the game's colors, shapes, and layout."
             )
         else:
-            img_ctx = "No images are attached. Use the text data below."
+            has_before = bool(image_before_url)
+            has_after = bool(image_after_url)
+            has_composite = bool(image_diff_url)
+            if has_before and has_after and has_composite:
+                img_ctx = (
+                    "You have three images: BEFORE (1st), AFTER (2nd), and a "
+                    "composite (3rd) with BEFORE|AFTER|REMOVED|ADDED panels. "
+                    "Use them to understand the game's colors, shapes, and layout."
+                )
+            elif has_before and has_after:
+                img_ctx = (
+                    "You have two images: BEFORE (1st) and AFTER (2nd). "
+                    "Use them to understand the game's colors, shapes, and layout."
+                )
+            elif has_after:
+                img_ctx = (
+                    "You have one image showing the AFTER state. "
+                    "Use it to understand the game's colors, shapes, and layout."
+                )
+            elif has_before:
+                img_ctx = (
+                    "You have one image showing the BEFORE state. "
+                    "Use it to understand the game's colors, shapes, and layout."
+                )
+            else:
+                img_ctx = "No images are attached. Use the text data below."
 
         prompt = OBSERVER_PROMPT.format(
             state_before=clean_before,
             state_after=clean_after,
             diff_text=diff_text,
             image_context=img_ctx,
+            known_elements=known_elements,
         )
-        images = [url for url in [image_before_url, image_after_url, image_diff_url] if url]
-        raw_output = self._call_llm(
-            prompt,
-            max_tokens=self.semantic_observer_max_tokens,
-            temperature=self.semantic_observer_temperature,
-            image_data_urls=images or None,
-        )
+
+        # Build media attachments
+        if video_url:
+            # Video mode — single video instead of images
+            raw_output = self._call_llm(
+                prompt,
+                max_tokens=self.semantic_observer_max_tokens,
+                temperature=self.semantic_observer_temperature,
+                video_url=video_url,
+            )
+        else:
+            images = [
+                url
+                for url in [image_before_url, image_after_url, image_diff_url]
+                if url
+            ]
+            raw_output = self._call_llm(
+                prompt,
+                max_tokens=self.semantic_observer_max_tokens,
+                temperature=self.semantic_observer_temperature,
+                image_data_urls=images or None,
+            )
         answer_output = self._extract_answer(raw_output)
         self.last_raw_output = raw_output
         self.last_answer_output = answer_output
@@ -500,11 +531,21 @@ class Learner:
         max_tokens: int = 1024,
         temperature: float = 1.0,
         image_data_urls: list[str] | None = None,
+        video_url: str | None = None,
     ) -> str:
         """Call the LLM with a single prompt."""
         content: str | list[dict[str, object]]
         image_data_urls = [u for u in (image_data_urls or []) if u]
-        if image_data_urls:
+        if video_url:
+            # vLLM Qwen3-VL expects {"type": "video", "video": "file:///..."}
+            video_ref = video_url
+            if not video_ref.startswith(("file://", "http://", "https://", "data:")):
+                video_ref = f"file://{video_ref}"
+            content = [
+                {"type": "text", "text": prompt},
+                {"type": "video", "video": video_ref},
+            ]
+        elif image_data_urls:
             content = [{"type": "text", "text": prompt}]
             for url in image_data_urls:
                 content.append(
@@ -632,6 +673,44 @@ class Learner:
 
         return text
 
+    @staticmethod
+    def extract_entities(raw_output: str) -> dict[int, str]:
+        """Parse ENTITIES section from Observer output.
+
+        Expected format (anywhere in the output):
+            ENTITIES:
+            green(3): player piece (high)
+            black(0): background (medium)
+
+        Returns mapping of color_int -> role_label.
+        Robust: returns empty dict if parsing fails.
+        """
+        result: dict[int, str] = {}
+        # Find the ENTITIES: section
+        match = re.search(r"(?im)^ENTITIES\s*:", raw_output)
+        if not match:
+            return result
+
+        lines = raw_output[match.end() :].splitlines()
+        # Pattern: color_name(N): role (confidence)
+        entity_re = re.compile(
+            r"^\s*\w+\((\d+)\)\s*:\s*(.+?)(?:\s*\((?:low|medium|high)\))?\s*$",
+            re.IGNORECASE,
+        )
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            # Stop at ANSWER: or other section markers
+            if re.match(r"(?i)^(ANSWER|STATE|CELL|KNOWN|GRID)\b", stripped):
+                break
+            m = entity_re.match(stripped)
+            if m:
+                color_int = int(m.group(1))
+                label = m.group(2).strip()
+                if label:
+                    result[color_int] = label
+        return result
 
     @staticmethod
     def _strip_objects(state_text: str) -> str:

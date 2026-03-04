@@ -32,6 +32,7 @@ from arc_agi import Arcade
 from arcengine import GameAction
 from openai import OpenAI
 
+from agents.templates.loop_agent.entity_registry import EntityRegistry
 from agents.templates.loop_agent.learner import Learner
 from agents.templates.loop_agent.memory import Memory
 from agents.templates.loop_agent.state_encoder import ARC_RGB_PALETTE, StateEncoder
@@ -100,6 +101,10 @@ def main() -> None:
         "--no-objects", action="store_true",
         help="Strip OBJECTS/RELATIONS from state text sent to all prompts",
     )
+    parser.add_argument(
+        "--video", action="store_true",
+        help="Send BEFORE+AFTER as a video instead of separate images (requires Qwen3-VL)",
+    )
     args = parser.parse_args()
 
     cell_sizes = args.cell_sizes or [16]
@@ -111,6 +116,7 @@ def main() -> None:
     learner = Learner(client, VLLM_MODEL)
     encoder = StateEncoder()
     memory = Memory(max_entries=50)
+    entity_reg = EntityRegistry()
 
     print(f"{BOLD}VLLM:{RESET} {VLLM_BASE_URL}  model: {VLLM_MODEL}")
     print(f"{BOLD}Game:{RESET} {args.game}")
@@ -227,6 +233,8 @@ def main() -> None:
         grid_w = len(grid[0]) if grid else 0
         observer_results = []
 
+        known_el = entity_reg.to_prompt_text()
+
         if num_changed == 0:
             observed = "No changes occurred; the grid is identical before and after the action."
             print(f"\n{GREEN}{BOLD}Observer:{RESET}")
@@ -235,13 +243,25 @@ def main() -> None:
         else:
             for cs in cell_sizes:
                 px_w, px_h = grid_w * cs, grid_h * cs
-                # 0=none, 1=AFTER only, 2=BEFORE+AFTER, 3=BEFORE+AFTER+composite
-                img_before = encoder.grid_to_image_data_url(grid_before, cell_size=cs) if num_images >= 2 else None
-                img_after = encoder.grid_to_image_data_url(grid, cell_size=cs) if num_images >= 1 else None
-                img_diff = encoder.transition_image_data_url(grid_before, grid, cell_size=cs) if num_images >= 3 else None
 
-                imgs_label = f"{num_images}img" if num_images > 0 else "text-only"
-                label = f"cell_size={cs} ({px_w}x{px_h}px, {imgs_label})" if num_images > 0 else "text-only"
+                # Video mode: generate temp video instead of separate images
+                video_path = None
+                img_before = None
+                img_after = None
+                img_diff = None
+                if args.video:
+                    video_path = encoder.grid_sequence_to_video(
+                        [grid_before, grid], cell_size=cs,
+                    )
+                    imgs_label = "video"
+                else:
+                    # 0=none, 1=AFTER only, 2=BEFORE+AFTER, 3=BEFORE+AFTER+composite
+                    img_before = encoder.grid_to_image_data_url(grid_before, cell_size=cs) if num_images >= 2 else None
+                    img_after = encoder.grid_to_image_data_url(grid, cell_size=cs) if num_images >= 1 else None
+                    img_diff = encoder.transition_image_data_url(grid_before, grid, cell_size=cs) if num_images >= 3 else None
+                    imgs_label = f"{num_images}img" if num_images > 0 else "text-only"
+
+                label = f"cell_size={cs} ({px_w}x{px_h}px, {imgs_label})" if num_images > 0 or args.video else "text-only"
                 print(f"\n{GREEN}{BOLD}Observer [{label}]:{RESET}")
                 observed = learner.observe_transition(
                     state_before=strip_obj(state_before),
@@ -250,15 +270,37 @@ def main() -> None:
                     image_before_url=img_before,
                     image_after_url=img_after,
                     image_diff_url=img_diff,
+                    video_url=video_path,
+                    known_elements=known_el,
                 )
                 # Show full thinking (raw) then the extracted answer
-                raw = learner.last_raw_output
-                if raw != observed and raw:
-                    print(f"  {DIM}{raw}{RESET}")
+                raw_out = learner.last_raw_output
+                if raw_out != observed and raw_out:
+                    print(f"  {DIM}{raw_out}{RESET}")
                     print(f"  {GREEN}{BOLD}=> {observed}{RESET}")
                 else:
                     print(f"  {GREEN}{observed}{RESET}")
                 observer_results.append((cs, observed))
+
+                # Clean up temp video
+                if video_path:
+                    try:
+                        os.unlink(video_path)
+                    except OSError:
+                        pass
+
+        # Update entity registry from observer output
+        entity_reg.update_census(grid)
+        if observer_results:
+            # Use the last observer result for entity extraction
+            raw_entities = Learner.extract_entities(learner.last_raw_output)
+            if raw_entities:
+                entity_reg.update_labels(raw_entities)
+
+        # Display entity registry
+        reg_text = entity_reg.to_display_text()
+        print(f"\n{DIM}Entity Registry:{RESET}")
+        print(f"{DIM}{reg_text}{RESET}")
 
         # --- Judge scores if WM was used ---
         if not args.no_wm:
