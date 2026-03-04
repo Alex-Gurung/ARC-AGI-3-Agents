@@ -58,13 +58,21 @@ class EntityRegistry:
             if color not in seen_colors:
                 self._entries[color].area = 0
 
-    def update_labels(self, observer_entities: dict[int, str]) -> None:
+    def update_labels(
+        self,
+        observer_entities: dict[int, str],
+        initial_confidence: float | None = None,
+    ) -> None:
         """Update semantic labels from Observer's ENTITIES output.
 
         Args:
             observer_entities: mapping of color_int -> element_role
                 Multiple colors may map to the same role (multi-color element).
+            initial_confidence: override for first-observation confidence
+                (default CONF_INITIAL). Use CONF_THRESHOLD to make
+                exploration results immediately visible.
         """
+        conf_init = initial_confidence if initial_confidence is not None else self.CONF_INITIAL
         for color, new_label in observer_entities.items():
             if color not in self._entries:
                 self._entries[color] = EntityEntry(color=color)
@@ -73,7 +81,7 @@ class EntityRegistry:
 
             if not entry.label:
                 entry.label = new_label
-                entry.confidence = self.CONF_INITIAL
+                entry.confidence = conf_init
             elif self._labels_match(entry.label, new_label):
                 entry.confidence = min(
                     self.CONF_CAP, entry.confidence + self.CONF_INCREMENT

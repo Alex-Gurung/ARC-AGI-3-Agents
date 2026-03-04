@@ -195,16 +195,15 @@ def run_exploration(env, encoder, learner, entity_reg, game_id, n_actions, cell_
     else:
         print(f"  {GREEN}{answer}{RESET}")
 
-    # Update entity registry
+    # Update entity registry — use threshold as initial confidence so
+    # exploration results are immediately visible in subsequent prompts
     entity_reg.update_census(grid)
     raw_entities = Learner.extract_entities(response)
     if raw_entities:
-        entity_reg.update_labels(raw_entities)
-        # Give a confidence boost since this was a multi-frame analysis
-        for color in raw_entities:
-            if color in entity_reg._entries:
-                e = entity_reg._entries[color]
-                e.confidence = min(0.95, e.confidence + 0.15)
+        entity_reg.update_labels(
+            raw_entities,
+            initial_confidence=EntityRegistry.CONF_THRESHOLD,
+        )
         print(f"\n{DIM}Entity Registry (after exploration):{RESET}")
         print(f"{DIM}{entity_reg.to_display_text()}{RESET}")
 
